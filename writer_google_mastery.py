@@ -13,6 +13,23 @@ from reader_databricks_google import GoogleContext, clean_text
 from config_google_mastery import SCORING_EXCLUDED, PRIORITY_POINTS, IMPORTANCE, MAX_FINDINGS
 from config import STATUS_OK, STATUS_FLAG, STATUS_PARTIAL
 
+def _safe_write(ws, cell_addr, value):
+    """Write to a cell, automatically resolving merged cell top-left anchor."""
+    from openpyxl.cell import MergedCell
+    cell = ws[cell_addr]
+    if isinstance(cell, MergedCell):
+        # Find the top-left cell of the merge range that contains this cell
+        for merge_range in ws.merged_cells.ranges:
+            if cell_addr in merge_range:
+                top_left = ws.cell(merge_range.min_row, merge_range.min_col)
+                top_left.value = value
+                return
+        # Fallback: skip silently if no range found
+        return
+    cell.value = value
+
+
+
 
 def _compute_score(results: dict) -> tuple:
     score = 100
@@ -41,15 +58,15 @@ def write_mastery_output(template_path: str, output_path: str, results: dict, ct
 
     score, grade = _compute_score(results)
 
-    ws_main["A1"] = f"{ctx.hash_name} — Google Account Mastery Analysis"
-    ws_main["B3"] = f"Account: {ctx.hash_name} | Tenant ID: {ctx.tenant_id} | Account ID: {ctx.account_id}"
+    _safe_write(ws_main, "A1", f"{ctx.hash_name} — Google Account Mastery Analysis")
+    _safe_write(ws_main, "B3", f"Account: {ctx.hash_name} | Tenant ID: {ctx.tenant_id} | Account ID: {ctx.account_id}")
     if ctx.window_start and ctx.window_end and ctx.window_days:
-        ws_main["B4"] = f"{ctx.window_start} to {ctx.window_end} ({ctx.window_days} days)"
+        _safe_write(ws_main, "B4", f"{ctx.window_start} to {ctx.window_end} ({ctx.window_days} days)")
     if ctx.downloaded:
         ws_main["B5"] = ctx.downloaded
         ws_main["B5"].number_format = "yyyy-mm-dd hh:mm:ss"
-    ws_main["C8"] = score
-    ws_main["D8"] = grade
+    _safe_write(ws_main, "C8", score)
+    _safe_write(ws_main, "D8", grade)
 
     cid_to_row = {}
     for r in range(2, ws_ref.max_row + 1):
