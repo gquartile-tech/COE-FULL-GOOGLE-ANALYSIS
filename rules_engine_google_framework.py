@@ -15,8 +15,8 @@ import pandas as pd
 from config import ControlResult, STATUS_OK, STATUS_FLAG, STATUS_PARTIAL
 from config_google_framework import WHY
 from reader_databricks_google import (
-    GoogleContext, get_sheet, find_col, to_float, to_str, clean_text,
-    money_str, pct_str, num_str,
+    GoogleContext, get_sheet, find_col, get_active_campaigns,
+    to_float, to_str, clean_text, money_str, pct_str, num_str,
 )
 
 PROMO_PATTERN = re.compile(r'\b(sale|promo|holiday|black.?friday|cyber|bfcm|seasonal|clearance|discount)\b', re.IGNORECASE)
@@ -24,14 +24,9 @@ QT_PREFIX     = re.compile(r'^QT[_\-]', re.IGNORECASE)
 
 
 def _active_campaigns(ctx: GoogleContext) -> pd.DataFrame:
-    """Return ENABLED campaigns from Tab 38 Campaign Settings."""
-    df = get_sheet(ctx, "CAMPAIGN_SETTINGS")
-    if df.empty:
-        return pd.DataFrame()
-    status_col = find_col(df, ["Status", "status"])
-    if status_col:
-        return df[df[status_col].astype(str).str.upper() == "ENABLED"].copy()
-    return df.copy()
+    """Return ENABLED campaigns — uses shared get_active_campaigns() which handles
+    both old (Tab 38) and new (Tab 37) export formats with uppercase channel type."""
+    return get_active_campaigns(ctx)
 
 
 def _spend_by_campaign(ctx: GoogleContext) -> dict:
@@ -50,29 +45,26 @@ def _spend_by_campaign(ctx: GoogleContext) -> dict:
 
 def _f001(ctx: GoogleContext) -> ControlResult:
     """Naming Convention Compliance"""
-    df = get_sheet(ctx, "CAMPAIGN_SETTINGS")
-    if df.empty:
-        return ControlResult(STATUS_FLAG, "Tab 38 not found.", WHY["F001"])
+    active = _active_campaigns(ctx)
+    if active.empty:
+        return ControlResult(STATUS_FLAG, "No active campaign data found.", WHY["F001"])
 
-    name_col   = find_col(df, ["CampaignName", "campaign_name"])
-    status_col = find_col(df, ["Status", "status"])
+    name_col = find_col(active, ["CampaignName", "campaign_name"])
+    cid_col  = find_col(active, ["CampaignId", "campaign_id"])
     if not name_col:
         return ControlResult(STATUS_FLAG, "CampaignName column not found.", WHY["F001"])
 
     spend_map = _spend_by_campaign(ctx)
-    active = df[df[status_col].astype(str).str.upper() == "ENABLED"] if status_col else df
-
     non_qt = []
     for _, row in active.iterrows():
         name = to_str(row[name_col])
-        cid = to_str(row.get("CampaignId", ""))
+        cid  = to_str(row[cid_col]) if cid_col else ""
         spend = spend_map.get(cid, 0) or 0
         if spend > 0 and not QT_PREFIX.match(name):
             non_qt.append(name)
 
     total_active = len(active)
     non_qt_count = len(non_qt)
-
     if non_qt_count == 0:
         status = STATUS_OK
     elif non_qt_count / max(total_active, 1) <= 0.10:
@@ -82,7 +74,8 @@ def _f001(ctx: GoogleContext) -> ControlResult:
 
     sample = ", ".join(non_qt[:3])
     msg = (f"{non_qt_count} of {total_active} active campaigns with spend don't follow QT_ naming. "
-           f"Examples: {sample}." if non_qt else f"All {total_active} active campaigns follow QT_ naming convention.")
+           f"Examples: {sample}." if non_qt else
+           f"All {total_active} active campaigns follow QT_ naming convention.")
     return ControlResult(status, msg, WHY["F001"])
 
 
@@ -90,27 +83,28 @@ def _f002(ctx: GoogleContext) -> ControlResult:
     """Legacy Campaign Cleanup"""
     df = get_sheet(ctx, "CAMPAIGN_SETTINGS")
     if df.empty:
-        return ControlResult(STATUS_FLAG, "Tab 38 not found.", WHY["F002"])
+        df = get_sheet(ctx, "CAMPAIGNS_V2_ENRICHED")
+    if df.empty:
+        return ControlResult(STATUS_PARTIAL, "No campaign data found. Manual legacy check required.", WHY["F002"])
 
-    name_col   = find_col(df, ["CampaignName"])
-    status_col = find_col(df, ["Status"])
-    start_col  = find_col(df, ["StartDate", "start_date"])
-    if not status_col or not start_col:
-        return ControlResult(STATUS_PARTIAL, "Status or StartDate column not found. Manual legacy check required.", WHY["F002"])
+    name_col  = find_col(df, ["CampaignName"])
+    state_col = find_col(df, ["State", "Status", "state"])
+    start_col = find_col(df, ["StartDate", "start_date"])
+    if not state_col or not start_col:
+        return ControlResult(STATUS_PARTIAL, "State or StartDate column not found. Manual legacy check required.", WHY["F002"])
 
     spend_map = _spend_by_campaign(ctx)
     ref = ctx.window_end or pd.Timestamp.now().date()
     legacy = []
     for _, row in df.iterrows():
-        st = to_str(row[status_col]).upper()
-        if st != "PAUSED":
+        st = to_str(row[state_col]).lower()
+        if st != "paused":
             continue
         sd = pd.to_datetime(str(row[start_col]), errors="coerce")
         if pd.isna(sd):
             continue
-        days_old = (pd.Timestamp(ref) - sd).days
-        if days_old > 180:
-            cid = to_str(row.get("CampaignId", ""))
+        if (pd.Timestamp(ref) - sd).days > 180:
+            cid   = to_str(row.get("CampaignId", ""))
             spend = spend_map.get(cid, 0) or 0
             if spend > 0:
                 legacy.append(to_str(row[name_col]) if name_col else cid)
@@ -120,61 +114,31 @@ def _f002(ctx: GoogleContext) -> ControlResult:
     elif len(legacy) <= 3:
         return ControlResult(STATUS_PARTIAL, f"{len(legacy)} paused campaign(s) with spend older than 180 days: {', '.join(legacy[:3])}.", WHY["F002"])
     else:
-        return ControlResult(STATUS_FLAG, f"{len(legacy)} legacy paused campaigns with historical spend found. Examples: {', '.join(legacy[:3])}.", WHY["F002"])
+        return ControlResult(STATUS_FLAG, f"{len(legacy)} legacy paused campaigns with historical spend. Examples: {', '.join(legacy[:3])}.", WHY["F002"])
 
 
 def _f003(ctx: GoogleContext) -> ControlResult:
-    """Auto-Apply Settings — proxy via bidding strategy"""
-    df = get_sheet(ctx, "CAMPAIGN_SETTINGS")
-    if df.empty:
-        return ControlResult(STATUS_PARTIAL, "Tab 38 not found. Manual auto-apply check required in Google Ads.", WHY["F003"])
-
-    bid_col  = find_col(df, ["BiddingStrategyType", "bidding_strategy_type"])
-    name_col = find_col(df, ["CampaignName"])
-    st_col   = find_col(df, ["Status"])
-
-    if not bid_col:
-        return ControlResult(STATUS_PARTIAL, "BiddingStrategyType not found. Manual auto-apply check required.", WHY["F003"])
-
-    active = df[df[st_col].astype(str).str.upper() == "ENABLED"] if st_col else df
-    non_qt = []
-    for _, row in active.iterrows():
-        name = to_str(row[name_col]) if name_col else ""
-        bst = to_str(row[bid_col]).upper()
-        if not QT_PREFIX.match(name) and bst not in ("", "NAN"):
-            non_qt.append(f"{name}: {bst}")
-
-    if not non_qt:
-        return ControlResult(STATUS_OK, "All active campaigns appear to follow QT governance patterns.", WHY["F003"])
-    else:
-        return ControlResult(STATUS_PARTIAL, f"{len(non_qt)} non-QT campaign(s) with active bid strategies. Manual auto-apply verification required. Examples: {', '.join(non_qt[:2])}.", WHY["F003"])
+    """Auto-Apply Settings — fully manual, no data source covers this"""
+    return ControlResult(
+        STATUS_OK,
+        "Manual review required. In Google Ads: Recommendations → Auto-apply settings. Verify all auto-apply options are disabled.",
+        WHY["F003"],
+    )
 
 
 def _f004(ctx: GoogleContext) -> ControlResult:
-    """Display Expansion Disabled on Search"""
-    df = get_sheet(ctx, "CAMPAIGN_SETTINGS")
-    if df.empty:
-        return ControlResult(STATUS_FLAG, "Tab 38 not found.", WHY["F004"])
-
-    ch_col   = find_col(df, ["AdvertisingChannelType"])
-    net_col  = find_col(df, ["TargetContentNetwork"])
-    st_col   = find_col(df, ["Status"])
-    name_col = find_col(df, ["CampaignName"])
-    if not ch_col or not net_col:
-        return ControlResult(STATUS_PARTIAL, "Channel type or TargetContentNetwork not found.", WHY["F004"])
-
-    active = df[df[st_col].astype(str).str.upper() == "ENABLED"] if st_col else df
-    flagged = []
-    for _, row in active.iterrows():
-        ch = to_str(row[ch_col]).upper()
-        net = to_str(row[net_col]).lower()
-        if ch == "SEARCH" and net in ("true", "1"):
-            name = to_str(row[name_col]) if name_col else "unknown"
-            flagged.append(name)
-
-    if not flagged:
-        return ControlResult(STATUS_OK, "No Search campaigns have TargetContentNetwork enabled.", WHY["F004"])
-    return ControlResult(STATUS_FLAG, f"{len(flagged)} Search campaign(s) have display expansion enabled: {', '.join(flagged[:3])}.", WHY["F004"])
+    """Display Expansion on Search — fully manual, TargetContentNetwork not in any export tab"""
+    active = _active_campaigns(ctx)
+    ch_col = find_col(active, ["AdvertisingChannelType"]) if not active.empty else None
+    if ch_col:
+        search_count = (active[ch_col].astype(str).str.upper() == "SEARCH").sum()
+    else:
+        search_count = 0
+    return ControlResult(
+        STATUS_OK,
+        f"{search_count} active Search campaign(s) detected. Manual review required: open each Search campaign in Google Ads and confirm 'Display Network' expansion is unchecked.",
+        WHY["F004"],
+    )
 
 
 def _f005(ctx: GoogleContext) -> ControlResult:
@@ -215,17 +179,15 @@ def _f005(ctx: GoogleContext) -> ControlResult:
 
 def _f006(ctx: GoogleContext) -> ControlResult:
     """Promotion End Dates"""
-    df = get_sheet(ctx, "CAMPAIGN_SETTINGS")
-    if df.empty:
-        return ControlResult(STATUS_PARTIAL, "Tab 38 not found.", WHY["F006"])
+    active = _active_campaigns(ctx)
+    if active.empty:
+        return ControlResult(STATUS_PARTIAL, "No campaign data found. Manual promotion end date check required.", WHY["F006"])
 
-    name_col  = find_col(df, ["CampaignName"])
-    start_col = find_col(df, ["StartDate"])
-    st_col    = find_col(df, ["Status"])
+    name_col  = find_col(active, ["CampaignName"])
+    start_col = find_col(active, ["StartDate", "start_date"])
     if not name_col or not start_col:
         return ControlResult(STATUS_PARTIAL, "CampaignName or StartDate not found.", WHY["F006"])
 
-    active = df[df[st_col].astype(str).str.upper() == "ENABLED"] if st_col else df
     ref = ctx.window_end or pd.Timestamp.now().date()
     flagged = []
     for _, row in active.iterrows():
@@ -279,41 +241,40 @@ def _f008(ctx: GoogleContext) -> ControlResult:
 
 
 def _f009(ctx: GoogleContext) -> ControlResult:
-    """TM Terms in QT Portal — proxy via branded keyword detection"""
+    """TM Terms in QT Portal — no Databricks data covers portal upload status"""
     df = get_sheet(ctx, "KEYWORD_REPORT")
     if df.empty:
-        return ControlResult(STATUS_PARTIAL, "Keyword report not found. Manual TM terms portal check required.", WHY["F009"])
+        return ControlResult(STATUS_OK, "Manual review required. Log into QT Portal → Google → Branded Terms and verify all trademark terms are uploaded.", WHY["F009"])
 
-    kw_col = find_col(df, ["Keyword", "keyword"])
+    kw_col   = find_col(df, ["Keyword", "keyword", "TargetText"])
     camp_col = find_col(df, ["CampaignName"])
     if not kw_col:
-        return ControlResult(STATUS_PARTIAL, "Keyword column not found. Manual portal check required.", WHY["F009"])
+        return ControlResult(STATUS_OK, "Manual review required. Log into QT Portal → Google → Branded Terms to verify TM terms upload.", WHY["F009"])
 
-    # Look for TM/branded campaigns
     tm_keywords = []
     for _, row in df.iterrows():
         camp = to_str(row[camp_col]) if camp_col else ""
-        if re.search(r'\b(TM|Search_TM|Branded|Brand)\b', camp, re.IGNORECASE):
+        if re.search(r'\b(TM|Search_TM|Branded|Brand|SKW)\b', camp, re.IGNORECASE):
             kw = to_str(row[kw_col])
             if kw:
                 tm_keywords.append(kw)
 
     if tm_keywords:
-        return ControlResult(STATUS_PARTIAL, f"{len(tm_keywords)} TM keywords detected in Search campaigns. Portal upload status requires manual verification. Sample: {', '.join(set(tm_keywords[:3]))}.", WHY["F009"])
-    return ControlResult(STATUS_PARTIAL, "No TM keywords detected in Search campaigns. Manual QT Portal verification required.", WHY["F009"])
+        return ControlResult(STATUS_OK, f"{len(tm_keywords)} TM keywords detected in Search campaigns. Manual QT Portal verification required to confirm upload is current. Sample: {', '.join(set(tm_keywords[:3]))}.", WHY["F009"])
+    return ControlResult(STATUS_OK, "No TM keywords detected in Search campaigns. Manual QT Portal verification required.", WHY["F009"])
 
 
 def _f010(ctx: GoogleContext) -> ControlResult:
     """Branded Search Campaign Active"""
-    df = get_sheet(ctx, "CAMPAIGNS_V2_ENRICHED")
+    active = _active_campaigns(ctx)
+    enriched = get_sheet(ctx, "CAMPAIGNS_V2_ENRICHED")
+    df = active if not active.empty else enriched
     if df.empty:
-        df = get_sheet(ctx, "CAMPAIGN_SETTINGS")
-    if df.empty:
-        return ControlResult(STATUS_FLAG, "Campaign data not found.", WHY["F010"])
+        return ControlResult(STATUS_FLAG, "No campaign data found.", WHY["F010"])
 
     spend_map = _spend_by_campaign(ctx)
     name_col = find_col(df, ["CampaignName"])
-    ch_col   = find_col(df, ["AdvertisingChannelType", "CampaignType"])
+    ch_col   = find_col(df, ["AdvertisingChannelType"])
     cid_col  = find_col(df, ["CampaignId"])
 
     branded = []
@@ -321,7 +282,9 @@ def _f010(ctx: GoogleContext) -> ControlResult:
         name = to_str(row[name_col]) if name_col else ""
         ch   = to_str(row[ch_col]).upper() if ch_col else ""
         cid  = to_str(row[cid_col]) if cid_col else ""
-        if ch == "SEARCH" and re.search(r'\b(TM|Brand|Branded|SKW)\b', name, re.IGNORECASE):
+        _tokens = re.split(r'[_\-\s]+', name.upper())
+        _is_branded = any(t in ('TM','SKW') or t.startswith('BRAND') for t in _tokens)
+        if "SEARCH" in ch and _is_branded:
             spend = spend_map.get(cid, 0) or 0
             branded.append((name, spend))
 
@@ -333,15 +296,15 @@ def _f010(ctx: GoogleContext) -> ControlResult:
 
 def _f011(ctx: GoogleContext) -> ControlResult:
     """Non-Brand Search Campaign Active"""
-    df = get_sheet(ctx, "CAMPAIGNS_V2_ENRICHED")
+    active = _active_campaigns(ctx)
+    enriched = get_sheet(ctx, "CAMPAIGNS_V2_ENRICHED")
+    df = active if not active.empty else enriched
     if df.empty:
-        df = get_sheet(ctx, "CAMPAIGN_SETTINGS")
-    if df.empty:
-        return ControlResult(STATUS_FLAG, "Campaign data not found.", WHY["F011"])
+        return ControlResult(STATUS_FLAG, "No campaign data found.", WHY["F011"])
 
     spend_map = _spend_by_campaign(ctx)
     name_col = find_col(df, ["CampaignName"])
-    ch_col   = find_col(df, ["AdvertisingChannelType", "CampaignType"])
+    ch_col   = find_col(df, ["AdvertisingChannelType"])
     cid_col  = find_col(df, ["CampaignId"])
 
     nb_camps = []
@@ -349,7 +312,11 @@ def _f011(ctx: GoogleContext) -> ControlResult:
         name = to_str(row[name_col]) if name_col else ""
         ch   = to_str(row[ch_col]).upper() if ch_col else ""
         cid  = to_str(row[cid_col]) if cid_col else ""
-        if ch == "SEARCH" and re.search(r'\b(NB|NonBrand|Non_Brand|DSA|Dynamic)\b', name, re.IGNORECASE):
+        # NB detection: token-based to handle underscore-separated QT naming conventions
+        _nb_tokens = re.split(r'[_\-\s]+', name.upper())
+        _is_nb = any(t in ('NB','DSA','CATCHALL','SEARCHDSA') or
+                     t.startswith('NONBRAND') or t.startswith('DYNAMIC') for t in _nb_tokens)
+        if "SEARCH" in ch and _is_nb:
             spend = spend_map.get(cid, 0) or 0
             nb_camps.append((name, spend))
 
@@ -411,85 +378,83 @@ def _f013(ctx: GoogleContext) -> ControlResult:
     """Negative Keyword Coverage"""
     df = get_sheet(ctx, "NEGATIVE_KEYWORDS")
     if df.empty:
-        return ControlResult(STATUS_PARTIAL, "Negative keywords tab (31) not found or empty. Manual check required.", WHY["F013"])
+        return ControlResult(STATUS_PARTIAL, "Negative keywords tab not found or empty. Manual check required.", WHY["F013"])
 
     kw_col   = find_col(df, ["Keyword"])
     type_col = find_col(df, ["Type"])
 
-    # Check for actual keyword negatives (not just demographic exclusions)
+    # Filter to actual keyword negatives only — exclude LISTING_GROUP and WEBPAGE types
     if type_col:
-        kw_types = df[type_col].astype(str).str.upper().unique()
-        has_keyword_negatives = any(t in ("KEYWORD", "NEGATIVE_KEYWORD") for t in kw_types)
+        df_kw = df[df[type_col].astype(str).str.upper() == "KEYWORD"].copy()
     else:
-        has_keyword_negatives = False
+        df_kw = df.copy()
 
     if kw_col:
-        actual_kws = df[kw_col].dropna()
+        actual_kws = df_kw[kw_col].dropna()
         actual_kws = actual_kws[actual_kws.astype(str).str.strip() != ""]
         kw_count = len(actual_kws)
     else:
         kw_count = 0
 
+    total_rows = len(df)
+    listing_group_rows = len(df[df[type_col].astype(str).str.upper() == "LISTING_GROUP"]) if type_col else 0
+
     if kw_count > 0:
-        return ControlResult(STATUS_OK, f"{kw_count} negative keyword(s) found across campaigns.", WHY["F013"])
-    elif has_keyword_negatives:
-        return ControlResult(STATUS_PARTIAL, "Negative keyword records found but Keyword values are empty. Manual shared exclusion list check required.", WHY["F013"])
+        return ControlResult(STATUS_OK, f"{kw_count} keyword negative(s) found across campaigns ({listing_group_rows} listing group exclusions also present, not counted).", WHY["F013"])
+    elif listing_group_rows > 0:
+        return ControlResult(STATUS_PARTIAL, f"Tab contains {listing_group_rows} listing group exclusions but no keyword negatives. Shared keyword exclusion lists require manual verification in Google Ads.", WHY["F013"])
     else:
-        return ControlResult(STATUS_PARTIAL, "Tab 31 contains only demographic exclusions (age/gender), not keyword negatives. Shared keyword exclusion lists require manual verification.", WHY["F013"])
+        return ControlResult(STATUS_PARTIAL, f"No keyword negatives found in the export ({total_rows} total rows). Manual shared exclusion list check required.", WHY["F013"])
 
 
 def _f014(ctx: GoogleContext) -> ControlResult:
     """PMAX Bid Strategy"""
-    df = get_sheet(ctx, "CAMPAIGN_SETTINGS")
-    if df.empty:
-        return ControlResult(STATUS_FLAG, "Tab 38 not found.", WHY["F014"])
+    active = _active_campaigns(ctx)
+    if active.empty:
+        return ControlResult(STATUS_PARTIAL, "No campaign data found.", WHY["F014"])
 
-    ch_col  = find_col(df, ["AdvertisingChannelType"])
-    bid_col = find_col(df, ["BiddingStrategyType"])
-    name_col = find_col(df, ["CampaignName"])
-    st_col  = find_col(df, ["Status"])
+    ch_col  = find_col(active, ["AdvertisingChannelType"])
+    bid_col = find_col(active, ["BiddingStrategy", "BiddingStrategyType"])
+    name_col = find_col(active, ["CampaignName"])
     if not ch_col or not bid_col:
         return ControlResult(STATUS_PARTIAL, "Channel type or bidding strategy not found.", WHY["F014"])
 
-    active = df[df[st_col].astype(str).str.upper() == "ENABLED"] if st_col else df
     pmax_manual = []
     for _, row in active.iterrows():
         if "PERFORMANCE_MAX" in to_str(row[ch_col]).upper():
             bst = to_str(row[bid_col]).upper()
-            if "MANUAL_CPC" in bst:
+            if "MANUAL_CPC" in bst or "MANUAL" == bst:
                 name = to_str(row[name_col]) if name_col else "unknown"
                 pmax_manual.append(name)
 
     if not pmax_manual:
-        return ControlResult(STATUS_OK, "No active PMAX campaigns using MANUAL_CPC. Bid strategy is compliant.", WHY["F014"])
+        return ControlResult(STATUS_OK, "No active PMAX campaigns using MANUAL_CPC. Bid strategy compliant.", WHY["F014"])
     return ControlResult(STATUS_FLAG, f"{len(pmax_manual)} PMAX campaign(s) using MANUAL_CPC: {', '.join(pmax_manual[:3])}.", WHY["F014"])
 
 
 def _f015(ctx: GoogleContext) -> ControlResult:
     """Shopping Bid Strategy"""
-    df = get_sheet(ctx, "CAMPAIGN_SETTINGS")
-    if df.empty:
-        return ControlResult(STATUS_FLAG, "Tab 38 not found.", WHY["F015"])
+    active = _active_campaigns(ctx)
+    if active.empty:
+        return ControlResult(STATUS_PARTIAL, "No campaign data found.", WHY["F015"])
 
-    ch_col  = find_col(df, ["AdvertisingChannelType"])
-    bid_col = find_col(df, ["BiddingStrategyType"])
-    name_col = find_col(df, ["CampaignName"])
-    st_col  = find_col(df, ["Status"])
-    cid_col = find_col(df, ["CampaignId"])
+    ch_col   = find_col(active, ["AdvertisingChannelType"])
+    bid_col  = find_col(active, ["BiddingStrategy", "BiddingStrategyType"])
+    name_col = find_col(active, ["CampaignName"])
+    cid_col  = find_col(active, ["CampaignId"])
     if not ch_col or not bid_col:
         return ControlResult(STATUS_PARTIAL, "Channel type or bidding strategy not found.", WHY["F015"])
 
     spend_map = _spend_by_campaign(ctx)
-    active = df[df[st_col].astype(str).str.upper() == "ENABLED"] if st_col else df
     flagged = []
     for _, row in active.iterrows():
         if "SHOPPING" in to_str(row[ch_col]).upper():
-            bst = to_str(row[bid_col]).upper()
+            bst  = to_str(row[bid_col]).upper()
             name = to_str(row[name_col]) if name_col else ""
-            cid = to_str(row[cid_col]) if cid_col else ""
+            cid  = to_str(row[cid_col]) if cid_col else ""
             spend = spend_map.get(cid, 0) or 0
             is_suppression = re.search(r'\b(suppression|zombie|suppress)\b', name, re.IGNORECASE)
-            if "MANUAL_CPC" in bst and spend > 100 and not is_suppression:
+            if ("MANUAL_CPC" in bst or "MANUAL" == bst) and spend > 100 and not is_suppression:
                 flagged.append(f"{name} (spend: {money_str(spend)})")
 
     if not flagged:
@@ -540,17 +505,28 @@ def _f017(ctx: GoogleContext) -> ControlResult:
     df02 = get_sheet(ctx, "DATE_RANGE_KPIS")
     df22 = get_sheet(ctx, "CLIENT_SUCCESS")
     if df02.empty or df22.empty:
-        return ControlResult(STATUS_FLAG, "Tab 02 or 22 not found.", WHY["F017"])
+        return ControlResult(STATUS_FLAG, "Tab 02 or Client Success not found.", WHY["F017"])
 
     acos_col = find_col(df02, ["ACoS", "acos"])
     if not acos_col:
-        return ControlResult(STATUS_FLAG, "ACoS column not found in Tab 02.", WHY["F017"])
+        return ControlResult(STATUS_FLAG, "ACoS column not found in Date Range KPIs.", WHY["F017"])
 
     current_acos = to_float(df02.iloc[0][acos_col])
-    constraint   = to_float(df22.iloc[0].iloc[14]) if len(df22.iloc[0]) > 14 else None
+
+    # col[75] = 'acos' — already a decimal (e.g. 0.166 = 16.6%)
+    # col[14] = 'ACOS_Constraint__c' — stored as raw percentage (e.g. 16.6 meaning 16.6%)
+    # Use col[75] as it's already normalised; fall back to col[14]/100 if absent
+    cs_row = df22.iloc[0]
+    constraint = to_float(cs_row.iloc[75]) if len(cs_row) > 75 else None
+    if constraint is None and len(cs_row) > 14:
+        raw = to_float(cs_row.iloc[14])
+        if raw and raw > 1:          # raw value like 16.6 → divide by 100
+            constraint = raw / 100.0
+        elif raw:
+            constraint = raw         # already decimal (unlikely but safe)
 
     if current_acos is None:
-        return ControlResult(STATUS_FLAG, "ACoS value not found in Tab 02.", WHY["F017"])
+        return ControlResult(STATUS_FLAG, "ACoS value not found in Date Range KPIs.", WHY["F017"])
     if constraint is None or constraint == 0:
         return ControlResult(STATUS_PARTIAL, f"Current ACoS = {pct_str(current_acos)}. No ACoS constraint found in Salesforce.", WHY["F017"])
 
@@ -666,36 +642,39 @@ def _f020(ctx: GoogleContext) -> ControlResult:
 
 
 def _f021(ctx: GoogleContext) -> ControlResult:
-    """PMAX Channel Distribution"""
+    """PMAX Channel Distribution — Shopping should dominate PMAX spend"""
     df = get_sheet(ctx, "PMAX_CHANNELS")
     if df.empty:
-        return ControlResult(STATUS_FLAG, "Tab 18 (PMAX Channels) not found.", WHY["F021"])
+        return ControlResult(STATUS_FLAG, "PMAX Channels tab not found.", WHY["F021"])
 
     ft_col   = find_col(df, ["FieldType"])
     cost_col = find_col(df, ["Cost", "cost"])
     if not ft_col or not cost_col:
-        return ControlResult(STATUS_PARTIAL, "FieldType or Cost not found in Tab 18.", WHY["F021"])
+        return ControlResult(STATUS_PARTIAL, "FieldType or Cost not found in PMAX Channels tab.", WHY["F021"])
 
     total = sum(to_float(r[cost_col]) or 0 for _, r in df.iterrows())
     if total == 0:
         return ControlResult(STATUS_FLAG, "Total PMAX spend is zero.", WHY["F021"])
 
-    by_type = {}
+    by_type: dict = {}
     for _, row in df.iterrows():
-        ft = to_str(row[ft_col]).upper()
+        ft   = to_str(row[ft_col]).upper()
         cost = to_float(row[cost_col]) or 0
         by_type[ft] = by_type.get(ft, 0) + cost
 
     shopping_pct = by_type.get("SHOPPING", 0) / total
-    display_pct  = by_type.get("DISPLAY", 0) / total
+    display_pct  = by_type.get("DISPLAY",  0) / total
 
-    if shopping_pct >= 1.0 or display_pct == 0:
-        status = STATUS_FLAG if shopping_pct > 0.90 else STATUS_PARTIAL
+    # Shopping should be the dominant PMAX channel — flag if it's not
+    if shopping_pct < 0.40:
+        status = STATUS_FLAG
+    elif shopping_pct < 0.60:
+        status = STATUS_PARTIAL
     else:
         status = STATUS_OK
 
     parts = ", ".join(f"{k}: {v/total*100:.1f}%" for k, v in sorted(by_type.items()))
-    return ControlResult(status, f"PMAX distribution — {parts}. Total PMAX spend: {money_str(total)}.", WHY["F021"])
+    return ControlResult(status, f"PMAX distribution — {parts}. Total PMAX spend: {money_str(total)}. Shopping share = {shopping_pct*100:.1f}%.", WHY["F021"])
 
 
 # Manual controls F022-F027, F030, F032, F034, F035
@@ -834,44 +813,37 @@ def _f030(ctx: GoogleContext) -> ControlResult:
 
 
 def _f031(ctx: GoogleContext) -> ControlResult:
-    """Shopping Campaign Priority — infer from campaign name"""
-    df = get_sheet(ctx, "CAMPAIGNS_V2_ENRICHED")
+    """Shopping Campaign Priority — infer from campaign name tiers"""
+    active = _active_campaigns(ctx)
+    enriched = get_sheet(ctx, "CAMPAIGNS_V2_ENRICHED")
+    df = active if not active.empty else enriched
     if df.empty:
-        df = get_sheet(ctx, "CAMPAIGN_SETTINGS")
-    if df.empty:
-        return ControlResult(STATUS_PARTIAL, "Campaign data not found. Manual priority check required.", WHY["F031"])
+        return ControlResult(STATUS_PARTIAL, "No campaign data found. Manual priority check required.", WHY["F031"])
 
     name_col = find_col(df, ["CampaignName"])
-    ch_col   = find_col(df, ["AdvertisingChannelType", "CampaignType"])
-    st_col   = find_col(df, ["Status", "State", "IsEnabled"])
+    ch_col   = find_col(df, ["AdvertisingChannelType"])
     if not name_col or not ch_col:
         return ControlResult(STATUS_PARTIAL, "CampaignName or channel type not found.", WHY["F031"])
 
-    shopping = [r for _, r in df.iterrows()
-                if "SHOPPING" in to_str(r[ch_col]).upper()
-                and (not st_col or to_str(r[st_col]).upper() not in ("PAUSED", "REMOVED", "FALSE", "0"))]
+    shopping = [to_str(r[name_col]) for _, r in df.iterrows()
+                if "SHOPPING" in to_str(r[ch_col]).upper()]
 
     if not shopping:
-        return ControlResult(STATUS_OK, "No active Shopping campaigns found to evaluate priority.", WHY["F031"])
+        return ControlResult(STATUS_OK, "No active Shopping campaigns found — account may be PMAX-only which is a valid structure.", WHY["F031"])
 
-    conflicts = []
-    for row in shopping:
-        name = to_str(row[name_col])
-        is_general  = bool(re.search(r'\b(general|catchall|catch.all|everything)\b', name, re.IGNORECASE))
-        is_remnant  = bool(re.search(r'\b(remnant)\b', name, re.IGNORECASE))
-        is_zombie   = bool(re.search(r'\b(zombie)\b', name, re.IGNORECASE))
-        if not (is_general or is_remnant or is_zombie):
-            continue
-        if is_general and is_remnant:
-            conflicts.append(f"{name} (both General and Remnant patterns)")
+    has_suppression = any(re.search(r'\b(suppression|suppress)\b', n, re.IGNORECASE) for n in shopping)
+    has_general     = any(re.search(r'\b(general|catchall|catch.all|EE|everything)\b', n, re.IGNORECASE) for n in shopping)
+    has_remnant     = any(re.search(r'\b(remnant)\b', n, re.IGNORECASE) for n in shopping)
+    has_zombie      = any(re.search(r'\b(zombie)\b', n, re.IGNORECASE) for n in shopping)
 
-    if not conflicts:
-        return ControlResult(
-            STATUS_PARTIAL,
-            f"{len(shopping)} active Shopping campaign(s). Priority inferred from naming — actual Priority field requires manual verification in Google Ads.",
-            WHY["F031"],
-        )
-    return ControlResult(STATUS_FLAG, f"Priority conflicts detected: {', '.join(conflicts[:3])}.", WHY["F031"])
+    if len(shopping) == 1 and has_suppression:
+        return ControlResult(STATUS_OK, f"Single Shopping Suppression campaign detected — valid QT structure alongside PMAX. Campaign: '{shopping[0]}'.", WHY["F031"])
+
+    tiers_found = sum([has_general, has_remnant or has_zombie])
+    if tiers_found >= 2:
+        return ControlResult(STATUS_OK, f"{len(shopping)} active Shopping campaign(s). Priority tiers detected from naming. Manual Google Ads priority field verification still required.", WHY["F031"])
+    else:
+        return ControlResult(STATUS_PARTIAL, f"{len(shopping)} active Shopping campaign(s). Priority tier naming unclear: {', '.join(shopping[:3])}. Manual priority check required.", WHY["F031"])
 
 
 def _f032(ctx): return _manual_ok("F032", "Manual review required. Verify Keyword Expander status in QT Portal > Google Channel.", WHY["F032"])

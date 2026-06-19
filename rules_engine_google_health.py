@@ -23,16 +23,51 @@ from reader_databricks_google import (
 MONTH_NAMES = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
                7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
 
+# Metric name aliases — new export uses different names for some metrics
+_METRIC_ALIASES: Dict[str, List[str]] = {
+    "orders":  ["orders", "conversions (attributed)", "conversions"],
+    "adsales": ["adsales", "ad sales"],
+    "acos":    ["acos"],
+    "cpc":     ["cpc"],
+    "ctr":     ["ctr"],
+    "cr":      ["cr", "cvr", "conversion rate"],
+    "adspend": ["adspend", "ad spend"],
+}
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _parse_display_value(raw) -> Optional[float]:
+    """
+    Parse Tab 03 display strings into floats.
+    Handles: '15.4%' → 0.154, '$ 76,856' → 76856.0, '2.7%' → 0.027, '69' → 69.0
+    Percentage values are divided by 100 so they match the ratio representation
+    used everywhere else (ACoS, CTR, CR).
+    """
+    s = str(raw).strip()
+    if s.lower() in ("nan", "", "none"):
+        return None
+    is_pct = s.endswith('%')
+    s = s.replace('$', '').replace('%', '').replace(',', '').strip()
+    try:
+        f = float(s)
+        return f / 100.0 if is_pct else f
+    except (ValueError, TypeError):
+        return None
+
+
 def _yoy_row(df: pd.DataFrame, metric_name: str) -> Optional[dict]:
-    """Extract a row from the Yearly KPIs key-value table by metric name."""
+    """Extract a row from the Yearly KPIs key-value table by metric name.
+    Accepts multiple aliases to handle old vs new export metric naming."""
     col = find_col(df, ["metric", "Metric"])
     if col is None:
         return None
+    # Build lookup list: direct name + any aliases
+    metric_lower = metric_name.strip().lower()
+    aliases = _METRIC_ALIASES.get(metric_lower, [metric_lower])
     for _, row in df.iterrows():
-        if str(row[col]).strip().lower() == metric_name.lower():
+        cell = str(row[col]).strip().lower()
+        if cell == metric_lower or cell in aliases:
             return row.to_dict()
     return None
 
@@ -43,7 +78,6 @@ def _yoy_float(df: pd.DataFrame, metric_name: str) -> Optional[float]:
         return None
     yoy_col = find_col(pd.DataFrame([row]), ["YoY", "yoy"])
     if yoy_col is None:
-        # positional fallback: 4th column (index 3)
         vals = list(row.values())
         return to_float(vals[3]) if len(vals) > 3 else None
     return to_float(row.get(yoy_col))
@@ -56,9 +90,8 @@ def _yoy_this(df: pd.DataFrame, metric_name: str) -> Optional[float]:
     col = find_col(pd.DataFrame([row]), ["ThisPeriod", "this_period", "current"])
     if col is None:
         vals = list(row.values())
-        return to_float(vals[1]) if len(vals) > 1 else None
-    raw = str(row.get(col, "")).replace("$", "").replace(",", "").replace("%", "").strip()
-    return to_float(raw)
+        return _parse_display_value(vals[1]) if len(vals) > 1 else None
+    return _parse_display_value(row.get(col, ""))
 
 
 def _yoy_prev(df: pd.DataFrame, metric_name: str) -> Optional[float]:
@@ -68,9 +101,8 @@ def _yoy_prev(df: pd.DataFrame, metric_name: str) -> Optional[float]:
     col = find_col(pd.DataFrame([row]), ["PreviousPeriod", "previous_period", "prior"])
     if col is None:
         vals = list(row.values())
-        return to_float(vals[2]) if len(vals) > 2 else None
-    raw = str(row.get(col, "")).replace("$", "").replace(",", "").replace("%", "").strip()
-    return to_float(raw)
+        return _parse_display_value(vals[2]) if len(vals) > 2 else None
+    return _parse_display_value(row.get(col, ""))
 
 
 def _l3m_trend(df: pd.DataFrame, value_col_candidates: List[str]) -> Optional[List[dict]]:
@@ -482,43 +514,33 @@ def _h012(ctx: GoogleContext) -> ControlResult:
 def _h013(ctx: GoogleContext) -> ControlResult:
     """Zero-Spend Active Campaign Rate"""
     df13 = get_sheet(ctx, "CAMPAIGN_GOLD")
-    df38 = get_sheet(ctx, "CAMPAIGN_SETTINGS")
     if df13.empty:
-        return ControlResult(STATUS_FLAG, "Tab 13 (Campaign Gold Metrics) not found or no data.", WHY["H013"])
+        return ControlResult(STATUS_FLAG, "Campaign Gold Metrics tab not found or no data.", WHY["H013"])
 
     camp_col = find_col(df13, ["CampaignId", "campaign_id"])
     cost_col = find_col(df13, ["Cost", "cost", "Spend"])
     if camp_col is None or cost_col is None:
-        return ControlResult(STATUS_FLAG, "CampaignId or Cost column not found in Tab 13.", WHY["H013"])
+        return ControlResult(STATUS_FLAG, "CampaignId or Cost column not found in Campaign Gold Metrics.", WHY["H013"])
 
     spend_by_camp = df13.groupby(camp_col)[cost_col].sum().reset_index()
     spend_by_camp.columns = ["CampaignId", "TotalCost"]
 
-    # Get active campaigns from settings tab if available
-    active_camps = None
-    if not df38.empty:
-        status_col = find_col(df38, ["Status", "status"])
-        camp38_col = find_col(df38, ["CampaignId", "campaign_id"])
-        if status_col and camp38_col:
-            active_camps = set(
-                str(r[camp38_col]) for _, r in df38.iterrows()
-                if str(r[status_col]).upper() == "ENABLED"
-            )
+    # Use get_active_campaigns which handles both old (Tab 38) and new (Tab 37) formats
+    from reader_databricks_google import get_active_campaigns
+    active_df_full = get_active_campaigns(ctx)
+    if not active_df_full.empty:
+        cid_col = find_col(active_df_full, ["CampaignId"])
+        if cid_col:
+            active_ids = set(active_df_full[cid_col].astype(str))
+            spend_by_camp = spend_by_camp[spend_by_camp["CampaignId"].astype(str).isin(active_ids)]
 
-    if active_camps is not None:
-        active_df = spend_by_camp[spend_by_camp["CampaignId"].astype(str).isin(active_camps)]
-    else:
-        # fallback: all campaigns with any record
-        active_df = spend_by_camp
-
-    total_active = len(active_df)
-    zero_spend = len(active_df[active_df["TotalCost"].fillna(0) == 0])
+    total_active = len(spend_by_camp)
+    zero_spend   = len(spend_by_camp[spend_by_camp["TotalCost"].fillna(0) == 0])
 
     if total_active == 0:
         return ControlResult(STATUS_FLAG, "No active campaigns found.", WHY["H013"])
 
     zero_pct = zero_spend / total_active
-
     if zero_pct <= 0.10:
         status = STATUS_OK
     elif zero_pct <= 0.25:

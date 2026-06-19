@@ -18,14 +18,16 @@ from reader_databricks_google import (
 
 
 def _m001(ctx: GoogleContext) -> ControlResult:
-    """Meeting Frequency — last QR record in Client Success"""
+    """Meeting Frequency — last QR record date from Client Success"""
     df = get_sheet(ctx, "CLIENT_SUCCESS")
     if df.empty:
-        return ControlResult(STATUS_FLAG, "Tab 22 not found.", WHY["M001"])
+        return ControlResult(STATUS_FLAG, "Client Success tab not found.", WHY["M001"])
 
-    date_col = find_col(df, ["CreatedDate", "created_date"])
+    # Use CreatedDate of the CS record as the QR meeting date (Name field contains "Account - MM/DD/YY")
+    # LastModifiedDate is a better proxy for ongoing engagement
+    date_col = find_col(df, ["LastModifiedDate", "last_modified_date", "CreatedDate", "created_date"])
     if date_col is None:
-        return ControlResult(STATUS_FLAG, "CreatedDate column not found in Tab 22.", WHY["M001"])
+        return ControlResult(STATUS_FLAG, "Date column not found in Client Success.", WHY["M001"])
 
     dates = [_parse_date(v) for v in df[date_col] if not pd.isna(v)]
     dates = [d for d in dates if d is not None]
@@ -33,7 +35,7 @@ def _m001(ctx: GoogleContext) -> ControlResult:
         return ControlResult(STATUS_FLAG, "No meeting dates found in Salesforce.", WHY["M001"])
 
     last = max(dates)
-    ref = ctx.window_end or date.today()
+    ref  = ctx.window_end or date.today()
     days_ago = (ref - last).days
 
     if days_ago <= 30:
@@ -43,7 +45,7 @@ def _m001(ctx: GoogleContext) -> ControlResult:
     else:
         status = STATUS_FLAG
 
-    return ControlResult(status, f"Last meeting recorded {last}. {days_ago} days since last meeting.", WHY["M001"])
+    return ControlResult(status, f"Last CS record activity: {last}. {days_ago} days since last update.", WHY["M001"])
 
 
 def _m002(ctx: GoogleContext) -> ControlResult:
@@ -136,17 +138,33 @@ def _m004(ctx: GoogleContext) -> ControlResult:
 
 
 def _m005(ctx: GoogleContext) -> ControlResult:
-    """DPL Active"""
-    df = get_sheet(ctx, "DPL_PERFORMANCE")
-    if df.empty:
-        return ControlResult(
-            STATUS_FLAG,
-            "DPL Performance tab (28) returned no data for this account. DPL may not be configured.",
-            WHY["M005"],
-        )
+    """DPL Active — checks DPL performance data and DPL tag coverage"""
+    df_perf = get_sheet(ctx, "DPL_PERFORMANCE")
+    df_tags = get_sheet(ctx, "DPL_TAG_COVERAGE")
 
-    row_count = len(df)
-    return ControlResult(STATUS_OK, f"DPL Performance data found. {row_count} DPL records in window.", WHY["M005"])
+    if not df_perf.empty:
+        row_count = len(df_perf)
+        return ControlResult(STATUS_OK, f"DPL Performance data found. {row_count} DPL records in window.", WHY["M005"])
+
+    # Fallback: check DPL Tag Coverage tab (new exports only)
+    if not df_tags.empty:
+        has_dpl_col  = find_col(df_tags, ["HasDPLLabels"])
+        tag1_col     = find_col(df_tags, ["Tag1Label"])
+        prod_col     = find_col(df_tags, ["ProductCount"])
+        if has_dpl_col:
+            tagged = df_tags[df_tags[has_dpl_col].astype(str).str.lower() == "true"]
+            total_prods = df_tags[prod_col].apply(to_float).fillna(0).sum() if prod_col else 0
+            if len(tagged) > 0:
+                return ControlResult(STATUS_OK, f"DPL labels active via Tag Coverage tab. {len(tagged)} tag group(s) configured, {int(total_prods)} total products.", WHY["M005"])
+        # Tags exist but HasDPLLabels is False — labels configured but not active for bidding
+        if tag1_col and df_tags[tag1_col].notna().any():
+            return ControlResult(STATUS_PARTIAL, f"DPL tag structure present ({len(df_tags)} tag groups) but HasDPLLabels = False. DPL bid management may not be active.", WHY["M005"])
+
+    return ControlResult(
+        STATUS_FLAG,
+        "DPL Performance data not available and no DPL tag coverage found. DPL may not be configured for this account.",
+        WHY["M005"],
+    )
 
 
 def _m006(ctx: GoogleContext) -> ControlResult:

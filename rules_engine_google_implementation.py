@@ -15,8 +15,8 @@ import pandas as pd
 from config import ControlResult, STATUS_OK, STATUS_FLAG, STATUS_PARTIAL
 from config_google_implementation import WHY
 from reader_databricks_google import (
-    GoogleContext, get_sheet, find_col, to_float, to_str, clean_text,
-    money_str, pct_str,
+    GoogleContext, get_sheet, find_col, get_active_campaigns,
+    to_float, to_str, clean_text, money_str, pct_str,
 )
 
 QT_PREFIX = re.compile(r'^QT[_\-]', re.IGNORECASE)
@@ -186,17 +186,15 @@ def _i010(ctx): return _manual_ok("I010")
 
 
 def _i011(ctx: GoogleContext) -> ControlResult:
-    """Naming Conventions — QT_ prefix compliance"""
-    df = get_sheet(ctx, "CAMPAIGN_SETTINGS")
-    if df.empty:
-        return ControlResult(STATUS_FLAG, "Tab 38 not found.", WHY["I011"])
+    """Naming Conventions — QT_ prefix compliance on active campaigns"""
+    active = get_active_campaigns(ctx)
+    if active.empty:
+        return ControlResult(STATUS_FLAG, "No campaign data found.", WHY["I011"])
 
-    name_col   = find_col(df, ["CampaignName"])
-    status_col = find_col(df, ["Status"])
+    name_col = find_col(active, ["CampaignName"])
     if not name_col:
         return ControlResult(STATUS_FLAG, "CampaignName column not found.", WHY["I011"])
 
-    active = df[df[status_col].astype(str).str.upper() == "ENABLED"] if status_col else df
     total = len(active)
     if total == 0:
         return ControlResult(STATUS_PARTIAL, "No active campaigns found.", WHY["I011"])
@@ -252,17 +250,15 @@ def _i015(ctx): return _manual_ok("I015")
 
 def _i016(ctx: GoogleContext) -> ControlResult:
     """Promotion End Dates Correct — proxy via campaign naming"""
-    df = get_sheet(ctx, "CAMPAIGN_SETTINGS")
-    if df.empty:
-        return ControlResult(STATUS_PARTIAL, "Tab 38 not found. Manual promotion end date check required.", WHY["I016"])
+    active = get_active_campaigns(ctx)
+    if active.empty:
+        return ControlResult(STATUS_PARTIAL, "No campaign data found. Manual promotion end date check required.", WHY["I016"])
 
-    name_col  = find_col(df, ["CampaignName"])
-    start_col = find_col(df, ["StartDate"])
-    st_col    = find_col(df, ["Status"])
+    name_col  = find_col(active, ["CampaignName"])
+    start_col = find_col(active, ["StartDate", "start_date"])
     if not name_col or not start_col:
         return ControlResult(STATUS_PARTIAL, "CampaignName or StartDate not found.", WHY["I016"])
 
-    active = df[df[st_col].astype(str).str.upper() == "ENABLED"] if st_col else df
     ref = ctx.window_end or pd.Timestamp.now().date()
     stale_promos = []
 

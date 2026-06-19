@@ -83,49 +83,85 @@ def _parse_datetime(v) -> Optional[datetime]:
 
 
 # ── Tab name registry ─────────────────────────────────────────────────────────
-# Maps logical key → tab prefix. Reader uses prefix matching so minor
-# tab name changes don't break the agent.
+# Maps logical key → list of tab prefixes, checked in order.
+# Supports two export generations:
+#   OLD (Equip Supply style): tabs 13-40 at their original numbers
+#   NEW (current): all tabs shifted down by 1 (old 13→new 12, old 22→new 21, etc.)
+#                  plus a new tab 40_DPL_Tag_Coverage at the end
+# The reader tries every prefix in the list and uses the first match found.
 
 TAB_KEYS = {
-    "ADVERTISER_NAME":         "01_Advertiser_Name",
-    "DATE_RANGE_KPIS":         "02_Date_Range_KPIs",
-    "YEARLY_KPIS":             "03_Yearly_KPIs",
-    "L24M_MONTHLY":            "04_L24M_Monthly",
-    "MONTHLY_SALES_YOY":       "05_Monthly_Sales",
-    "CAMPAIGN_REPORT":         "06_Campaign_Report",
-    "CHANNEL_TYPE":            "07_Campaigns_by_Channel",
-    "PRODUCT_SHOPPING":        "08_Product_Shopping",
-    "KEYWORD_REPORT":          "09_Keyword_Report",
-    "SEARCH_TERMS":            "11_Search_Terms_Report",
-    "SEARCH_CLASSIFIER":       "12_Search_Terms_Classifier",
-    "CAMPAIGN_GOLD":           "13_Campaign_Gold",
-    "CAMPAIGN_METADATA":       "14_Campaign_Metadata",
-    "STRIPE_INFO":             "15_Stripe_and_Account",
-    "DEVICE_BREAKDOWN":        "16_Device_Breakdown",
-    "PRODUCT_MONTHLY_KPIS":    "17_Product_Monthly",
-    "PMAX_CHANNELS":           "18_PMAX_Channels",
-    "MULTICHANNEL_PRODUCTS":   "19_MultiChannel_Products",
-    "PRICE_COMPETITIVENESS":   "20_Price_Competitiveness",
-    "CAMPAIGN_MONTH_CDM":      "21_Campaign_Month",
-    "CLIENT_SUCCESS":          "22_Client_Success",
-    "CAMPAIGN_PERF_CDM":       "23_Campaign_Performance",
-    "PLA_SUMMARY":             "24_PLA_Summary",
-    "KPIS_CDM":                "25_KPIs_CDM",
-    "LOCATION_PERF":           "26_Location_Performance",
-    "AMAZON_PRODUCT":          "27_Amazon_Product",
-    "DPL_PERFORMANCE":         "28_DPL_Performance",
-    "SEARCH_TERMS_CDM":        "29_Search_Terms_Performance",
-    "FEED_PRODUCTS":           "30_Feed_Products",
-    "NEGATIVE_KEYWORDS":       "31_Negative_Keywords",
-    "ASSET_GROUPS":            "32_Google_Asset_Groups",
-    "ASSETS_EXTENSIONS":       "33_Google_Assets_Extensions",
-    "ADVERTISER_DETAILS":      "34_Google_Advertiser_Details",
-    "CAMPAIGNS_V2_ENRICHED":   "35_Google_Campaigns_V2_Enriched",
-    "PRODUCT_GROUPS":          "36_Google_Product_Groups",
-    "AD_GROUP_ADS":            "37_Google_Ad_Group_Ads",
-    "CAMPAIGN_SETTINGS":       "38_Google_Campaign_Settings",
-    "AD_GROUPS":               "39_Google_Ad_Groups",
-    "ACCOUNT_LINKS":           "40_Google_Account_Links",
+    "ADVERTISER_NAME":         ["01_Advertiser_Name"],
+    "DATE_RANGE_KPIS":         ["02_Date_Range_KPIs"],
+    "YEARLY_KPIS":             ["03_Yearly_KPIs"],
+    "L24M_MONTHLY":            ["04_L24M_Monthly"],
+    "MONTHLY_SALES_YOY":       ["05_Monthly_Sales"],
+    "CAMPAIGN_REPORT":         ["06_Campaign_Report"],
+    "CHANNEL_TYPE":            ["07_Campaigns_by_Channel"],
+    "PRODUCT_SHOPPING":        ["08_Product_Shopping"],
+    "KEYWORD_REPORT":          ["09_Keyword_Report"],
+    # Search Terms: old=11, new=10
+    "SEARCH_TERMS":            ["10_Search_Terms_Report",   "11_Search_Terms_Report"],
+    # Search Classifier: old=12, new=11
+    "SEARCH_CLASSIFIER":       ["11_Search_Terms_Classifier", "12_Search_Terms_Classifier"],
+    # Campaign Gold: old=13, new=12
+    "CAMPAIGN_GOLD":           ["12_Campaign_Gold",         "13_Campaign_Gold"],
+    # Campaign Metadata: old=14, new=13
+    "CAMPAIGN_METADATA":       ["13_Campaign_Metadata",     "14_Campaign_Metadata"],
+    # Stripe: old=15, new=14
+    "STRIPE_INFO":             ["14_Stripe_and_Account",    "15_Stripe_and_Account"],
+    # Device: old=16, new=15
+    "DEVICE_BREAKDOWN":        ["15_Device_Breakdown",      "16_Device_Breakdown"],
+    # Product Monthly: old=17, new=16 (absent in new; tab 16 is absent in new format)
+    "PRODUCT_MONTHLY_KPIS":    ["16_Product_Monthly",       "17_Product_Monthly"],
+    # PMAX Channels: old=18, new=17
+    "PMAX_CHANNELS":           ["17_PMAX_Channels",         "18_PMAX_Channels"],
+    # MultiChannel: old=19, new=18
+    "MULTICHANNEL_PRODUCTS":   ["18_MultiChannel_Products", "19_MultiChannel_Products"],
+    # Price Competitiveness: old=20, new=19
+    "PRICE_COMPETITIVENESS":   ["19_Price_Competitiveness", "20_Price_Competitiveness"],
+    # Campaign Month CDM: old=21, new=20
+    "CAMPAIGN_MONTH_CDM":      ["20_Campaign_Month",        "21_Campaign_Month"],
+    # Client Success: old=22, new=21
+    "CLIENT_SUCCESS":          ["21_Client_Success",        "22_Client_Success"],
+    # Campaign Perf CDM: old=23, new=22
+    "CAMPAIGN_PERF_CDM":       ["22_Campaign_Performance",  "23_Campaign_Performance"],
+    # PLA Summary: old=24, new=23
+    "PLA_SUMMARY":             ["23_PLA_Summary",           "24_PLA_Summary"],
+    # KPIs CDM: old=25, new=24
+    "KPIS_CDM":                ["24_KPIs_CDM",              "25_KPIs_CDM"],
+    # Location Perf: old=26, new=25
+    "LOCATION_PERF":           ["25_Location_Performance",  "26_Location_Performance"],
+    # Amazon Product: old=27, new=26
+    "AMAZON_PRODUCT":          ["26_Amazon_Product",        "27_Amazon_Product"],
+    # DPL Performance: old=28, new=27
+    "DPL_PERFORMANCE":         ["27_DPL_Performance",       "28_DPL_Performance"],
+    # Search Terms CDM: old=29, new=28
+    "SEARCH_TERMS_CDM":        ["28_Search_Terms_Performance", "29_Search_Terms_Performance"],
+    # Feed Products: old=30, new=29
+    "FEED_PRODUCTS":           ["29_Feed_Products",         "30_Feed_Products"],
+    # Negative Keywords: old=31, new=30
+    "NEGATIVE_KEYWORDS":       ["30_Negative_Keywords",     "31_Negative_Keywords"],
+    # Asset Groups: old=32, new=31
+    "ASSET_GROUPS":            ["31_Google_Asset_Groups",   "32_Google_Asset_Groups"],
+    # Assets Extensions: old=33, new=32
+    "ASSETS_EXTENSIONS":       ["32_Google_Assets_Extensions", "33_Google_Assets_Extensions"],
+    # Advertiser Details: old=34, new=33
+    "ADVERTISER_DETAILS":      ["33_Google_Advertiser_Details", "34_Google_Advertiser_Details"],
+    # Campaigns V2 Enriched: old=35, new=34
+    "CAMPAIGNS_V2_ENRICHED":   ["34_Google_Campaigns_V2_Enriched", "35_Google_Campaigns_V2_Enriched"],
+    # Product Groups: old=36, new=35
+    "PRODUCT_GROUPS":          ["35_Google_Product_Groups", "36_Google_Product_Groups"],
+    # Ad Group Ads: old=37, new=36
+    "AD_GROUP_ADS":            ["36_Google_Ad_Group_Ads",   "37_Google_Ad_Group_Ads"],
+    # Campaign Settings: old=38, new=37  ← previously empty; now populated in new format
+    "CAMPAIGN_SETTINGS":       ["37_Google_Campaign_Settings", "38_Google_Campaign_Settings"],
+    # Ad Groups: old=39, new=38
+    "AD_GROUPS":               ["38_Google_Ad_Groups",      "39_Google_Ad_Groups"],
+    # Account Links: old=40, new=39
+    "ACCOUNT_LINKS":           ["39_Google_Account_Links",  "40_Google_Account_Links"],
+    # DPL Tag Coverage: new only (tab 40) — not present in old exports
+    "DPL_TAG_COVERAGE":        ["40_DPL_Tag_Coverage"],
 }
 
 
@@ -205,15 +241,23 @@ def _extract_header(path: str) -> Tuple[str, str, str, Optional[date], Optional[
 def load_google_export(path: str) -> GoogleContext:
     """
     Load a Google Databricks export workbook.
-    Returns a GoogleContext with all 40 tabs loaded into sheets dict.
-    Sheets are keyed by logical TAB_KEY from TAB_KEYS registry.
-    Tabs not in the registry are silently skipped.
-    Tabs returning NO DATA are stored as empty DataFrames — callers must check len(df) == 0.
+    Returns a GoogleContext with all tabs loaded into sheets dict keyed by logical TAB_KEY.
+
+    Handles two export generations transparently:
+      - Old format: tabs numbered 13-40 (e.g. Equip Supply style)
+      - New format: tabs shifted down by 1 (old 13→12, old 22→21, etc.)
+                    plus new 40_DPL_Tag_Coverage tab
+    TAB_KEYS maps each logical key to a list of candidate prefixes tried in order.
+    Tabs returning NO DATA or empty are stored as empty DataFrames.
     """
     xls = pd.ExcelFile(path, engine="calamine")
 
-    # Build reverse map: prefix → key
-    prefix_to_key = {v: k for k, v in TAB_KEYS.items()}
+    # Build reverse map: prefix → logical key (first-match wins within each key's list)
+    prefix_to_key: Dict[str, str] = {}
+    for logical_key, prefixes in TAB_KEYS.items():
+        for prefix in prefixes:
+            if prefix not in prefix_to_key:
+                prefix_to_key[prefix] = logical_key
 
     def _match_key(sheet_name: str) -> Optional[str]:
         for prefix, key in prefix_to_key.items():
@@ -226,6 +270,9 @@ def load_google_export(path: str) -> GoogleContext:
     for sname in xls.sheet_names:
         key = _match_key(sname)
         if key is None:
+            continue
+        # Don't overwrite if this key was already loaded from a higher-priority prefix
+        if key in sheets and not sheets[key].empty:
             continue
         try:
             df = pd.read_excel(xls, sheet_name=sname, header=5)
@@ -281,3 +328,36 @@ def find_col(df: pd.DataFrame, candidates: list) -> Optional[str]:
         if key in norm:
             return norm[key]
     return None
+
+
+def get_active_campaigns(ctx: "GoogleContext") -> pd.DataFrame:
+    """
+    Return enabled campaigns from CAMPAIGN_SETTINGS (Tab 37/38).
+    Both old and new exports now use the same campaigns_v2 source with:
+      State (lowercase: enabled/paused/removed) and IsEnabled (bool).
+    Falls back to CAMPAIGNS_V2_ENRICHED if CAMPAIGN_SETTINGS is empty.
+    Always normalises AdvertisingChannelType to UPPERCASE before returning.
+    """
+    df = get_sheet(ctx, "CAMPAIGN_SETTINGS")
+    if df.empty:
+        df = get_sheet(ctx, "CAMPAIGNS_V2_ENRICHED")
+    if df.empty:
+        return pd.DataFrame()
+
+    # Normalise State/IsEnabled — field names are lowercase in campaigns_v2
+    state_col = find_col(df, ["State", "state"])
+    enabled_col = find_col(df, ["IsEnabled", "isenabled"])
+
+    if state_col:
+        mask = df[state_col].astype(str).str.lower() == "enabled"
+        df = df[mask].copy()
+    elif enabled_col:
+        mask = df[enabled_col].astype(str).str.lower().isin(["true", "1"])
+        df = df[mask].copy()
+
+    # Normalise AdvertisingChannelType to uppercase so all rules can compare consistently
+    ch_col = find_col(df, ["AdvertisingChannelType"])
+    if ch_col:
+        df[ch_col] = df[ch_col].astype(str).str.upper()
+
+    return df.copy()

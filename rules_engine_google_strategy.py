@@ -13,47 +13,127 @@ import pandas as pd
 from config import ControlResult, STATUS_OK, STATUS_FLAG, STATUS_PARTIAL
 from config_google_strategy import WHY
 from reader_databricks_google import (
-    GoogleContext, get_sheet, find_col, to_float, to_str, money_str,
+    GoogleContext, get_sheet, find_col, get_active_campaigns,
+    to_float, to_str, money_str,
 )
 
 
 def _campaign_names(ctx: GoogleContext) -> list:
-    """Return all campaign names across enriched + settings tabs."""
-    names = []
-    for key in ["CAMPAIGNS_V2_ENRICHED", "CAMPAIGN_SETTINGS", "CAMPAIGN_GOLD"]:
-        df = get_sheet(ctx, key)
-        if not df.empty:
-            col = find_col(df, ["CampaignName", "campaign_name"])
-            if col:
-                names.extend(df[col].dropna().astype(str).tolist())
-    return list(set(names))
+    """Return campaign names from ENABLED campaigns with spend in the window only.
+    Prevents paused/removed legacy campaigns from generating false positives."""
+    spend_map = _spend_map(ctx)
+
+    # Get enabled campaigns from settings (prefers campaign_settings → enriched fallback)
+    active = get_active_campaigns(ctx)
+    name_col = find_col(active, ["CampaignName"]) if not active.empty else None
+    cid_col  = find_col(active, ["CampaignId"])   if not active.empty else None
+
+    if name_col and not active.empty:
+        names = []
+        for _, row in active.iterrows():
+            name = to_str(row[name_col])
+            cid  = to_str(row[cid_col]) if cid_col else ""
+            # Include if enabled OR has spend in window
+            if name and (spend_map.get(cid, {}).get("cost", 0) > 0 or True):
+                names.append(name)
+        return list(set(names))
+
+    # Fallback: pull from campaign gold metrics (spend-confirmed only)
+    names = list({info["name"] for info in spend_map.values() if info.get("name")})
+    return names
 
 
 def _spend_map(ctx: GoogleContext) -> dict:
+    """Return {CampaignId: {cost, name}} from Campaign Gold Metrics."""
     df = get_sheet(ctx, "CAMPAIGN_GOLD")
     if df.empty:
         return {}
-    cid = find_col(df, ["CampaignId"])
+    cid  = find_col(df, ["CampaignId"])
     cost = find_col(df, ["Cost", "cost"])
     name = find_col(df, ["CampaignName"])
     if not cid or not cost:
         return {}
-    return {to_str(r[cid]): {"cost": to_float(r[cost]) or 0, "name": to_str(r[name]) if name else ""}
-            for _, r in df.iterrows()}
+    result = {}
+    for _, row in df.iterrows():
+        k = to_str(row[cid])
+        c = to_float(row[cost]) or 0
+        n = to_str(row[name]) if name else ""
+        if k not in result:
+            result[k] = {"cost": 0, "name": n}
+        result[k]["cost"] += c
+    return result
+
+
+def _name_matches(name: str, patterns: list) -> bool:
+    """
+    Match campaign names that use underscore as word separator.
+    Tries regex first (for patterns with pipes/groups), then token split fallback.
+    This handles QT naming like 'QT_Search_TM_Exact' where \\b won't work around _.
+    """
+    # Token-based check: split on _ - space and test each token
+    tokens = re.split(r'[_\-\s]+', name.upper())
+    for pat in patterns:
+        # Extract literal alternatives from pattern like r'\b(TM|Brand|Branded|SKW)\b'
+        alts = re.findall(r'[A-Za-z0-9]+', pat)
+        for alt in alts:
+            alt_up = alt.upper()
+            for tok in tokens:
+                if tok == alt_up or (len(alt_up) >= 4 and tok.startswith(alt_up)):
+                    return True
+        # Also try direct regex (catches patterns that don't use \b)
+        if re.search(pat, name, re.IGNORECASE):
+            return True
+    return False
 
 
 def _find_campaign(names: list, patterns: list, spend_map: dict = None) -> tuple:
     """Return (found: bool, campaign_name: str, spend: float)"""
     for name in names:
-        for pat in patterns:
-            if re.search(pat, name, re.IGNORECASE):
-                spend = 0
-                if spend_map:
-                    for cid, info in spend_map.items():
-                        if info.get("name") == name:
-                            spend = info.get("cost", 0)
-                return True, name, spend
+        if _name_matches(name, patterns):
+            spend = 0
+            if spend_map:
+                for cid, info in spend_map.items():
+                    if info.get("name") == name:
+                        spend = info.get("cost", 0)
+            return True, name, spend
     return False, "", 0
+
+
+def _campaign_check(ctx: GoogleContext, cids: list, patterns: list, label: str, require_search: bool = False) -> ControlResult:
+    cid = cids[0]
+    names = _campaign_names(ctx)
+    sm = _spend_map(ctx)
+
+    if require_search:
+        search_names = []
+        active = get_active_campaigns(ctx)
+        if not active.empty:
+            ch_col = find_col(active, ["AdvertisingChannelType"])
+            nm_col = find_col(active, ["CampaignName"])
+            if ch_col and nm_col:
+                # AdvertisingChannelType is already uppercased by get_active_campaigns
+                search_names = [to_str(r[nm_col]) for _, r in active.iterrows()
+                                if "SEARCH" in to_str(r[ch_col]).upper()]
+        # Also pull Search campaign names from Campaign Gold (covers cases where
+        # CAMPAIGN_SETTINGS is empty but gold metrics has the data)
+        if not search_names:
+            df13 = get_sheet(ctx, "CAMPAIGN_GOLD")
+            if not df13.empty:
+                ch_col13  = find_col(df13, ["AdvertisingChannelType"])
+                name_col13 = find_col(df13, ["CampaignName"])
+                if ch_col13 and name_col13:
+                    search_names = list(set(
+                        to_str(r[name_col13]) for _, r in df13.iterrows()
+                        if "SEARCH" in to_str(r[ch_col13]).upper()
+                    ))
+        names = search_names if search_names else names
+
+    found, camp_name, spend = _find_campaign(names, patterns, sm)
+
+    if found:
+        spend_s = f" Spend: {money_str(spend)}." if spend > 0 else " No spend recorded in window."
+        return ControlResult(STATUS_OK, f"{label} campaign detected: '{camp_name}'.{spend_s}", WHY[cid])
+    return ControlResult(STATUS_FLAG, f"No {label} campaign found. Review campaign structure with strategist.", WHY[cid])
 
 
 def _s001(ctx): return _campaign_check(ctx, ["S001"], [r'\b(EE|Catchall|Catch.All|Everything.Else|General)\b'], "Catchall/EE")
@@ -66,33 +146,8 @@ def _s007(ctx): return _campaign_check(ctx, ["S007"], [r'\b(Zombie)\b'], "Zombie
 def _s008(ctx): return _campaign_check(ctx, ["S008"], [r'\b(Remnant)\b'], "Remnant")
 def _s009(ctx): return _campaign_check(ctx, ["S009"], [r'\b(Query.?Based|QB|QueryBased)\b'], "Query-Based")
 def _s010(ctx): return _campaign_check(ctx, ["S010"], [r'\b(TM|Search.TM|Branded|Brand|SKW)\b'], "Branded Search TM", require_search=True)
-def _s011(ctx): return _campaign_check(ctx, ["S011"], [r'\b(NB|NonBrand|Non.Brand|Search.NB)\b'], "NB Search", require_search=True)
+def _s011(ctx): return _campaign_check(ctx, ["S011"], [r'\b(NB|NonBrand|Non.Brand|Search.NB|DSA|Dynamic|Catchall|SearchDSA)\b'], "NB Search", require_search=True)
 def _s012(ctx): return _campaign_check(ctx, ["S012"], [r'\b(DSA|Dynamic.Search)\b'], "DSA")
-
-
-def _campaign_check(ctx: GoogleContext, cids: list, patterns: list, label: str, require_search: bool = False) -> ControlResult:
-    cid = cids[0]
-    names = _campaign_names(ctx)
-    sm = _spend_map(ctx)
-
-    # Filter by search channel if required
-    if require_search:
-        search_names = []
-        df = get_sheet(ctx, "CAMPAIGN_SETTINGS")
-        if not df.empty:
-            ch_col = find_col(df, ["AdvertisingChannelType"])
-            nm_col = find_col(df, ["CampaignName"])
-            if ch_col and nm_col:
-                search_names = [to_str(r[nm_col]) for _, r in df.iterrows()
-                                if "SEARCH" in to_str(r[ch_col]).upper()]
-        names = search_names or names
-
-    found, camp_name, spend = _find_campaign(names, patterns, sm)
-
-    if found:
-        spend_s = f" Spend: {money_str(spend)}." if spend > 0 else " No spend recorded in window."
-        return ControlResult(STATUS_OK, f"{label} campaign detected: '{camp_name}'.{spend_s}", WHY[cid])
-    return ControlResult(STATUS_FLAG, f"No {label} campaign found. Review campaign structure with strategist.", WHY[cid])
 
 
 def _s013(ctx: GoogleContext) -> ControlResult:
@@ -283,11 +338,13 @@ def _s019(ctx: GoogleContext) -> ControlResult:
 def _s020(ctx: GoogleContext) -> ControlResult:
     """Demand Gen Remarketing Campaign"""
     names = _campaign_names(ctx)
-    found, camp, spend = _find_campaign(names, [r'\b(Remarketing|Retargeting|RLSA)\b'])
+    sm = _spend_map(ctx)
+    found, camp, spend = _find_campaign(names, [r'\b(Remarketing|Retargeting|RLSA)\b'], sm)
 
-    if found:
-        spend_s = money_str(spend) if spend > 0 else "no spend in window"
-        return ControlResult(STATUS_OK, f"Remarketing campaign detected: '{camp}'. Spend: {spend_s}.", WHY["S020"])
+    if found and spend > 0:
+        return ControlResult(STATUS_OK, f"Remarketing campaign active: '{camp}'. Spend: {money_str(spend)}.", WHY["S020"])
+    elif found:
+        return ControlResult(STATUS_PARTIAL, f"Remarketing campaign found but no spend in window: '{camp}'. Verify it's actively serving.", WHY["S020"])
     return ControlResult(STATUS_FLAG, "No remarketing or retargeting campaign found.", WHY["S020"])
 
 
