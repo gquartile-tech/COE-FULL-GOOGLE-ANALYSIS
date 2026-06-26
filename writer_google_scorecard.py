@@ -180,6 +180,36 @@ def _status_fill(val) -> PatternFill:
     return PatternFill(fill_type=None)
 
 
+def _safe_cell(ws, row: int, col: int):
+    """
+    Return the writable top-left cell for a given (row, col), resolving
+    merged cell ranges transparently. Returns None if the cell cannot be
+    written (e.g. it's inside a merge but has no anchor — shouldn't happen).
+    """
+    from openpyxl.cell import MergedCell
+    cell = ws.cell(row=row, column=col)
+    if not isinstance(cell, MergedCell):
+        return cell
+    for merge_range in ws.merged_cells.ranges:
+        if cell.coordinate in merge_range:
+            return ws.cell(merge_range.min_row, merge_range.min_col)
+    return None  # shouldn't reach here
+
+
+def _write(ws, row: int, col: int, value, fill=None, font=None, alignment=None):
+    """Write value + optional formatting to a cell, skipping MergedCell non-anchors."""
+    cell = _safe_cell(ws, row, col)
+    if cell is None:
+        return
+    cell.value = value
+    if fill is not None:
+        cell.fill = fill
+    if font is not None:
+        cell.font = font
+    if alignment is not None:
+        cell.alignment = alignment
+
+
 def write_scorecard_output(
     template_path: str,
     output_path: str,
@@ -200,14 +230,14 @@ def write_scorecard_output(
     ws = wb.active
 
     # ── Account header ────────────────────────────────────────────────────────
-    ws["A1"] = f"Scorecard — {ctx.hash_name}"
+    _write(ws, 1, 1, f"Scorecard — {ctx.hash_name}")
     if ctx.window_start and ctx.window_end:
-        ws["F1"] = f"{ctx.window_start} to {ctx.window_end}"
+        _write(ws, 1, 6, f"{ctx.window_start} to {ctx.window_end}")
 
     # ── KPI block (rows 3-13, col D) ─────────────────────────────────────────
     kpis = _get_kpi_values(ctx)
     for row, val in kpis.items():
-        ws.cell(row=row, column=4).value = val
+        _write(ws, row, 4, val)
 
     # ── Main checkbox rows ────────────────────────────────────────────────────
     for row_num, (pillar_key, control_id) in ROW_MAP.items():
@@ -216,16 +246,17 @@ def write_scorecard_output(
         if res is None:
             continue
         val = _val(res)
-        cell = ws.cell(row=row_num, column=4)
-        cell.value = val
-        cell.fill = _status_fill(val)
+        _write(ws, row_num, 4, val, fill=_status_fill(val))
 
-        # Write What We Saw into col F as a tooltip/note
-        note_cell = ws.cell(row=row_num, column=6)
-        if not note_cell.value:   # don't overwrite existing template notes
-            note_cell.value = res.what[:200] if res.what else ""
-            note_cell.alignment = Alignment(wrap_text=True)
-            note_cell.font = Font(size=8, color="595959")
+        # Write What We Saw into col F only if the cell is currently empty
+        note_cell = _safe_cell(ws, row_num, 6)
+        if note_cell is not None and not note_cell.value:
+            _write(
+                ws, row_num, 6,
+                res.what[:200] if res.what else "",
+                font=Font(size=8, color="595959"),
+                alignment=Alignment(wrap_text=True),
+            )
 
     wb.save(output_path)
     print(f"[writer_scorecard] Saved: {output_path}")
