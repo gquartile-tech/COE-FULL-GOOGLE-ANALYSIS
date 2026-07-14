@@ -117,7 +117,7 @@
   <div class="badge"><span class="badge-dot"></span>COE · GOOGLE ADS FULL ANALYSIS</div>
   <h1>Google CoE <span>Analysis</span><br>Report Generator</h1>
   <p class="tagline">
-    One Google Databricks export. Five analysis reports + one QR Scorecard — Health, Mastery, Framework, Strategy, Implementation, and a pre-filled QR Scorecard template.<br>
+    One Google Databricks export. Five analysis reports — Health, Mastery, Framework, Strategy, and Implementation.<br>
     Each agent runs independently. All outputs ready for download individually.
   </p>
 
@@ -140,14 +140,13 @@
 
     <div class="section">
       <div class="step-lbl">STEP 02 — AGENTS (SEQUENTIAL)</div>
-      <div class="step-title">Five Google analyses + QR Scorecard will run on your file</div>
+      <div class="step-title">Five Google analyses will run on your file</div>
       <div class="agents-grid">
         <div class="agent-pill"><span class="agent-dot"></span><span class="agent-name">Google Health</span></div>
         <div class="agent-pill"><span class="agent-dot"></span><span class="agent-name">Google Mastery</span></div>
         <div class="agent-pill"><span class="agent-dot"></span><span class="agent-name">Google Framework</span></div>
         <div class="agent-pill"><span class="agent-dot"></span><span class="agent-name">Google Strategy</span></div>
         <div class="agent-pill"><span class="agent-dot"></span><span class="agent-name">Google Implementation</span></div>
-        <div class="agent-pill"><span class="agent-dot"></span><span class="agent-name">QR Scorecard</span></div>
       </div>
     </div>
   </div>
@@ -166,8 +165,7 @@
       <div class="ps" id="s4"><span class="ps-dot"></span>Framework — evaluating campaign structure &amp; governance</div>
       <div class="ps" id="s5"><span class="ps-dot"></span>Strategy — documenting campaign coverage &amp; channel mix</div>
       <div class="ps" id="s6"><span class="ps-dot"></span>Implementation — verifying tracking, naming &amp; setup</div>
-      <div class="ps" id="s7"><span class="ps-dot"></span>Scorecard — mapping all pillar results to QR template</div>
-      <div class="ps" id="s8"><span class="ps-dot"></span>Finalising all six output files</div>
+      <div class="ps" id="s7"><span class="ps-dot"></span>Finalising all five output files</div>
     </div>
   </div>
 
@@ -220,15 +218,6 @@
       </div>
       <div class="ar-body" id="body-google_implementation"></div>
     </div>
-
-    <div class="agent-result" id="res-google_scorecard">
-      <div class="ar-head">
-        <span class="ar-icon">📊</span>
-        <span class="ar-label">Google QR Scorecard</span>
-        <span class="ar-status" id="st-google_scorecard">—</span>
-      </div>
-      <div class="ar-body" id="body-google_scorecard"></div>
-    </div>
   </div>
 
   <button id="reset">← Analyse another account</button>
@@ -274,8 +263,8 @@ pillX.addEventListener('click', function(){
 });
 
 // ── Progress steps ─────────────────────────────────────────────────────────
-var steps  = ['s1','s2','s3','s4','s5','s6','s7','s8'];
-var delays = [0, 500, 1200, 2200, 3400, 4800, 6400, 7600];
+var steps  = ['s1','s2','s3','s4','s5','s6','s7'];
+var delays = [0, 500, 1200, 2200, 3400, 4800, 6400];
 var timers = [];
 
 function startSteps() {
@@ -358,7 +347,7 @@ runB.addEventListener('click', function() {
     if (data.error) { showErr(data.error); runB.disabled = false; return; }
 
     var agents = data.agents || {};
-    ['google_health','google_mastery','google_framework','google_strategy','google_implementation','google_scorecard'].forEach(function(key) {
+    ['google_health','google_mastery','google_framework','google_strategy','google_implementation'].forEach(function(key) {
       if (agents[key]) renderAgent(key, agents[key]);
     });
 
