@@ -91,6 +91,7 @@ def _parse_datetime(v) -> Optional[datetime]:
 # The reader tries every prefix in the list and uses the first match found.
 
 TAB_KEYS = {
+    # ── Stable tabs (01-09): identical across all export generations ──────────
     "ADVERTISER_NAME":         ["01_Advertiser_Name"],
     "DATE_RANGE_KPIS":         ["02_Date_Range_KPIs"],
     "YEARLY_KPIS":             ["03_Yearly_KPIs"],
@@ -100,68 +101,87 @@ TAB_KEYS = {
     "CHANNEL_TYPE":            ["07_Campaigns_by_Channel"],
     "PRODUCT_SHOPPING":        ["08_Product_Shopping"],
     "KEYWORD_REPORT":          ["09_Keyword_Report"],
-    # Search Terms: old=11, new=10
-    "SEARCH_TERMS":            ["10_Search_Terms_Report",   "11_Search_Terms_Report"],
-    # Search Classifier: old=12, new=11
-    "SEARCH_CLASSIFIER":       ["11_Search_Terms_Classifier", "12_Search_Terms_Classifier"],
-    # Campaign Gold: old=13, new=12
-    "CAMPAIGN_GOLD":           ["12_Campaign_Gold",         "13_Campaign_Gold"],
-    # Campaign Metadata: old=14, new=13
-    "CAMPAIGN_METADATA":       ["13_Campaign_Metadata",     "14_Campaign_Metadata"],
-    # Stripe: old=15, new=14
-    "STRIPE_INFO":             ["14_Stripe_and_Account",    "15_Stripe_and_Account"],
-    # Device: old=16, new=15
-    "DEVICE_BREAKDOWN":        ["15_Device_Breakdown",      "16_Device_Breakdown"],
-    # Product Monthly: old=17, new=16 (absent in new; tab 16 is absent in new format)
-    "PRODUCT_MONTHLY_KPIS":    ["16_Product_Monthly",       "17_Product_Monthly"],
-    # PMAX Channels: old=18, new=17
-    "PMAX_CHANNELS":           ["17_PMAX_Channels",         "18_PMAX_Channels"],
-    # MultiChannel: old=19, new=18
-    "MULTICHANNEL_PRODUCTS":   ["18_MultiChannel_Products", "19_MultiChannel_Products"],
-    # Price Competitiveness: old=20, new=19
-    "PRICE_COMPETITIVENESS":   ["19_Price_Competitiveness", "20_Price_Competitiveness"],
-    # Campaign Month CDM: old=21, new=20
-    "CAMPAIGN_MONTH_CDM":      ["20_Campaign_Month",        "21_Campaign_Month"],
-    # Client Success: old=22, new=21
-    "CLIENT_SUCCESS":          ["21_Client_Success",        "22_Client_Success"],
-    # Campaign Perf CDM: old=23, new=22
-    "CAMPAIGN_PERF_CDM":       ["22_Campaign_Performance",  "23_Campaign_Performance"],
-    # PLA Summary: old=24, new=23
-    "PLA_SUMMARY":             ["23_PLA_Summary",           "24_PLA_Summary"],
-    # KPIs CDM: old=25, new=24
-    "KPIS_CDM":                ["24_KPIs_CDM",              "25_KPIs_CDM"],
-    # Location Perf: old=26, new=25
-    "LOCATION_PERF":           ["25_Location_Performance",  "26_Location_Performance"],
-    # Amazon Product: old=27, new=26
-    "AMAZON_PRODUCT":          ["26_Amazon_Product",        "27_Amazon_Product"],
-    # DPL Performance: old=28, new=27
-    "DPL_PERFORMANCE":         ["27_DPL_Performance",       "28_DPL_Performance"],
-    # Search Terms CDM: old=29, new=28
-    "SEARCH_TERMS_CDM":        ["28_Search_Terms_Performance", "29_Search_Terms_Performance"],
-    # Feed Products: old=30, new=29
-    "FEED_PRODUCTS":           ["29_Feed_Products",         "30_Feed_Products"],
-    # Negative Keywords: old=31, new=30
-    "NEGATIVE_KEYWORDS":       ["30_Negative_Keywords",     "31_Negative_Keywords"],
-    # Asset Groups: old=32, new=31
-    "ASSET_GROUPS":            ["31_Google_Asset_Groups",   "32_Google_Asset_Groups"],
-    # Assets Extensions: old=33, new=32
-    "ASSETS_EXTENSIONS":       ["32_Google_Assets_Extensions", "33_Google_Assets_Extensions"],
-    # Advertiser Details: old=34, new=33
-    "ADVERTISER_DETAILS":      ["33_Google_Advertiser_Details", "34_Google_Advertiser_Details"],
-    # Campaigns V2 Enriched: old=35, new=34
-    "CAMPAIGNS_V2_ENRICHED":   ["34_Google_Campaigns_V2_Enriched", "35_Google_Campaigns_V2_Enriched"],
-    # Product Groups: old=36, new=35
-    "PRODUCT_GROUPS":          ["35_Google_Product_Groups", "36_Google_Product_Groups"],
-    # Ad Group Ads: old=37, new=36
-    "AD_GROUP_ADS":            ["36_Google_Ad_Group_Ads",   "37_Google_Ad_Group_Ads"],
-    # Campaign Settings: old=38, new=37  ← previously empty; now populated in new format
-    "CAMPAIGN_SETTINGS":       ["37_Google_Campaign_Settings", "38_Google_Campaign_Settings"],
-    # Ad Groups: old=39, new=38
-    "AD_GROUPS":               ["38_Google_Ad_Groups",      "39_Google_Ad_Groups"],
-    # Account Links: old=40, new=39
-    "ACCOUNT_LINKS":           ["39_Google_Account_Links",  "40_Google_Account_Links"],
-    # DPL Tag Coverage: new only (tab 40) — not present in old exports
-    "DPL_TAG_COVERAGE":        ["40_DPL_Tag_Coverage"],
+    # ── Shifted tabs: gen1=old number, gen2=mid number, gen3(48-tab)=new number
+    # Each list is checked in order; first match wins.
+    # Search Terms:       gen1=11, gen2=10
+    "SEARCH_TERMS":            ["10_Search_Terms_Report",    "11_Search_Terms_Report"],
+    # Search Classifier:  gen1=12, gen2=11
+    "SEARCH_CLASSIFIER":       ["11_Search_Terms_Classifier","12_Search_Terms_Classifier"],
+    # Campaign Gold:      gen1=13, gen2=12
+    "CAMPAIGN_GOLD":           ["12_Campaign_Gold",          "13_Campaign_Gold"],
+    # Campaign Metadata:  gen1=14, gen2=13
+    "CAMPAIGN_METADATA":       ["13_Campaign_Metadata",      "14_Campaign_Metadata"],
+    # Stripe:             gen1=15, gen2=14
+    "STRIPE_INFO":             ["14_Stripe_and_Account",     "15_Stripe_and_Account"],
+    # Device:             gen1=16, gen2=15
+    "DEVICE_BREAKDOWN":        ["15_Device_Breakdown",       "16_Device_Breakdown"],
+    # Product Monthly:    gen1=17, gen2=16
+    "PRODUCT_MONTHLY_KPIS":    ["16_Product_Monthly",        "17_Product_Monthly"],
+    # PMAX Channels:      gen1=18, gen2=17
+    "PMAX_CHANNELS":           ["17_PMAX_Channels",          "18_PMAX_Channels"],
+    # MultiChannel:       gen1=19, gen2=18
+    "MULTICHANNEL_PRODUCTS":   ["18_MultiChannel_Products",  "19_MultiChannel_Products"],
+    # Price Competitiveness: gen1=20, gen2=19
+    "PRICE_COMPETITIVENESS":   ["19_Price_Competitiveness",  "20_Price_Competitiveness"],
+    # Campaign Month CDM: gen1=21, gen2=20
+    "CAMPAIGN_MONTH_CDM":      ["20_Campaign_Month",         "21_Campaign_Month"],
+    # Client Success:     gen1=22, gen2=21
+    "CLIENT_SUCCESS":          ["21_Client_Success",         "22_Client_Success"],
+    # Campaign Perf CDM:  gen1=23, gen2=22
+    "CAMPAIGN_PERF_CDM":       ["22_Campaign_Performance",   "23_Campaign_Performance"],
+    # PLA Summary:        gen1=24, gen2=23
+    "PLA_SUMMARY":             ["23_PLA_Summary",            "24_PLA_Summary"],
+    # KPIs CDM:           gen1=25, gen2=24
+    "KPIS_CDM":                ["24_KPIs_CDM",               "25_KPIs_CDM"],
+    # Location Perf:      gen1=26, gen2=25, gen3=23
+    "LOCATION_PERF":           ["23_Location_Performance",   "25_Location_Performance",  "26_Location_Performance"],
+    # Amazon Product:     gen1=27, gen2=26, gen3=24
+    "AMAZON_PRODUCT":          ["24_Amazon_Product",         "26_Amazon_Product",        "27_Amazon_Product"],
+    # DPL Performance:    gen1=28, gen2=27, gen3=25
+    "DPL_PERFORMANCE":         ["25_DPL_Performance",        "27_DPL_Performance",       "28_DPL_Performance"],
+    # Search Terms CDM:   gen1=29, gen2=28, gen3=26
+    "SEARCH_TERMS_CDM":        ["26_Search_Terms_Performance","28_Search_Terms_Performance","29_Search_Terms_Performance"],
+    # Feed Products:      gen1=30, gen2=29, gen3=27
+    "FEED_PRODUCTS":           ["27_Feed_Products",          "29_Feed_Products",         "30_Feed_Products"],
+    # Negative Keywords:  gen1=31, gen2=30, gen3=28
+    "NEGATIVE_KEYWORDS":       ["28_Negative_Keywords",      "30_Negative_Keywords",     "31_Negative_Keywords"],
+    # Asset Groups:       gen1=32, gen2=31, gen3=29
+    "ASSET_GROUPS":            ["29_Google_Asset_Groups",    "31_Google_Asset_Groups",   "32_Google_Asset_Groups"],
+    # Assets Extensions:  gen1=33, gen2=32, gen3=30
+    "ASSETS_EXTENSIONS":       ["30_Google_Assets_Extensions","32_Google_Assets_Extensions","33_Google_Assets_Extensions"],
+    # Advertiser Details: gen1=34, gen2=33, gen3=31
+    "ADVERTISER_DETAILS":      ["31_Google_Advertiser_Details","33_Google_Advertiser_Details","34_Google_Advertiser_Details"],
+    # Campaigns V2:       gen1=35, gen2=34, gen3=32
+    "CAMPAIGNS_V2_ENRICHED":   ["32_Google_Campaigns_V2_Enriched","34_Google_Campaigns_V2_Enriched","35_Google_Campaigns_V2_Enriched"],
+    # Product Groups:     gen1=36, gen2=35, gen3=33
+    "PRODUCT_GROUPS":          ["33_Google_Product_Groups_Listin","35_Google_Product_Groups","36_Google_Product_Groups"],
+    # Ad Group Ads:       gen1=37, gen2=36, gen3=34
+    "AD_GROUP_ADS":            ["34_Google_Ad_Group_Ads",    "36_Google_Ad_Group_Ads",   "37_Google_Ad_Group_Ads"],
+    # Campaign Settings:  gen1=38, gen2=37, gen3=35
+    "CAMPAIGN_SETTINGS":       ["35_Google_Campaign_Settings","37_Google_Campaign_Settings","38_Google_Campaign_Settings"],
+    # Ad Groups:          gen1=39, gen2=38, gen3=36
+    "AD_GROUPS":               ["36_Google_Ad_Groups",       "38_Google_Ad_Groups",      "39_Google_Ad_Groups"],
+    # Account Links:      gen1=40, gen2=39, gen3=37
+    "ACCOUNT_LINKS":           ["37_Google_Account_Links",   "39_Google_Account_Links",  "40_Google_Account_Links"],
+    # DPL Tag Coverage:   gen2=40, gen3=38
+    "DPL_TAG_COVERAGE":        ["38_DPL_Tag_Coverage",       "40_DPL_Tag_Coverage"],
+    # ── New tabs — 48-tab export format (gen3) only ───────────────────────────
+    # Product Issue Summary: GMC product-level issues with servability flags
+    "PRODUCT_ISSUE_SUMMARY":   ["41_Product_Issue_Summary"],
+    # Conversion Actions: full conversion action config — Primary/Secondary, Category, Status
+    "CONVERSION_ACTIONS":      ["42_Conversion_Actions"],
+    # Product Health Summary: direct DisapprovalRate, TotalProducts, DisapprovedProducts
+    "PRODUCT_HEALTH_SUMMARY":  ["43_Product_Health_Summary"],
+    # Platform Connections: Shopify/e-commerce platform connection status
+    "PLATFORM_CONNECTIONS":    ["44_Platform_Connections"],
+    # Feed Duplicate Groups: GMC duplicate feed detection
+    "FEED_DUPLICATE_GROUPS":   ["45_Feed_Duplicate_Groups"],
+    # GMC Feed Status: feed health from GMC side
+    "GMC_FEED_STATUS":         ["46_GMC_Feed_Status"],
+    # Portal Feed Monitoring: QT Portal feed export status, HoursSinceLastUpdate, FreshPortalFeedFlag
+    "PORTAL_FEED_MONITORING":  ["47_Portal_Feed_Monitoring"],
+    # Salesforce Google Targets: SF-linked ROAS/budget targets for Google
+    "SALESFORCE_GOOGLE_TARGETS": ["48_Salesforce_Google_Targets"],
 }
 
 

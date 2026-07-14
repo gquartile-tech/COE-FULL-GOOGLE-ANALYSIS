@@ -31,7 +31,6 @@ TEMPLATES = {
     "google_framework":       BASE_DIR / "templates" / "CoE_Google_Framework_Analysis_Templates.xlsm",
     "google_strategy":        BASE_DIR / "templates" / "CoE_Google_Account_Strategy_Analysis_Templates.xlsm",
     "google_implementation":  BASE_DIR / "templates" / "CoE_Google_Account_Implementation_Analysis_Templates.xlsm",
-    "google_scorecard":       BASE_DIR / "templates" / "Google_Scorecard_-_v1_2026.xlsx",
 }
 
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -224,38 +223,6 @@ def run_google_implementation(input_path: str) -> dict:
     return out
 
 
-def _collect_pillar_results(key: str, input_path: str) -> dict:
-    """
-    Re-run only the rules engine for a pillar to get raw ControlResult objects.
-    Called after the writer has already run (which deletes ctx).
-    This is a thin pass — no file write, just evaluation.
-    """
-    from reader_databricks_google import load_google_export
-    ctx = load_google_export(input_path)
-    try:
-        if key == "google_health":
-            from rules_engine_google_health import evaluate_all_health
-            return evaluate_all_health(ctx)
-        elif key == "google_mastery":
-            from rules_engine_google_mastery import evaluate_all_mastery
-            return evaluate_all_mastery(ctx)
-        elif key == "google_framework":
-            from rules_engine_google_framework import evaluate_all_framework
-            return evaluate_all_framework(ctx)
-        elif key == "google_strategy":
-            from rules_engine_google_strategy import evaluate_all_strategy
-            return evaluate_all_strategy(ctx)
-        elif key == "google_implementation":
-            from rules_engine_google_implementation import evaluate_all_implementation
-            return evaluate_all_implementation(ctx)
-    except Exception:
-        return {}
-    finally:
-        del ctx
-        gc.collect()
-    return {}
-
-
 AGENTS = {
     "google_health":         run_google_health,
     "google_mastery":        run_google_mastery,
@@ -263,42 +230,6 @@ AGENTS = {
     "google_strategy":       run_google_strategy,
     "google_implementation": run_google_implementation,
 }
-
-# ── Scorecard runner (needs all 5 pillar results) ─────────────────────────────
-
-def run_google_scorecard(input_path: str, all_pillar_results: dict) -> dict:
-    from reader_databricks_google import load_google_export
-    from writer_google_scorecard import write_scorecard_output
-
-    tpl = TEMPLATES["google_scorecard"]
-    if not tpl.exists():
-        raise FileNotFoundError(f"Scorecard template not found: {tpl}")
-
-    ctx = load_google_export(input_path)
-    safe_hash = _safe_fn(ctx.hash_name or "UNKNOWN")
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fname = f"{safe_hash} - Google Scorecard - {ts}.xlsx"
-    fpath = OUTPUT_DIR / fname
-
-    write_scorecard_output(
-        template_path=str(tpl),
-        output_path=str(fpath),
-        all_results=all_pillar_results,
-        ctx=ctx,
-    )
-
-    size = fpath.stat().st_size if fpath.exists() else 0
-    if not fpath.exists() or size < MIN_OUTPUT_BYTES:
-        raise RuntimeError(f"Scorecard output too small ({size} bytes).")
-
-    # Count rows that were auto-populated
-    mapped = sum(1 for v in all_pillar_results.values() for _ in v)
-    del ctx
-    return {
-        "label":   "Google Scorecard",
-        "filename": fname,
-    }
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -336,18 +267,11 @@ def _analyze_inner():
     try:
         uploaded.save(input_path)
         agent_results = {}
-        pillar_result_dicts = {}  # raw ControlResult dicts for scorecard
 
         # Sequential execution — avoids Gunicorn worker timeout on Render
         for key, fn in AGENTS.items():
             try:
-                # Run pillar agent and stash its ControlResult dict separately
-                _out = fn(input_path)
-                agent_results[key] = {"status": "ok", **_out}
-                # Re-load ctx + re-run engine to get ControlResult objects for scorecard
-                # (writers delete ctx; we need results again — cheapest approach is a
-                #  second thin pass; only costs a re-read, not a re-write)
-                pillar_result_dicts[key] = _collect_pillar_results(key, input_path)
+                agent_results[key] = {"status": "ok", **fn(input_path)}
             except Exception as e:
                 traceback.print_exc()
                 agent_results[key] = {
@@ -357,20 +281,6 @@ def _analyze_inner():
                 }
             finally:
                 gc.collect()
-
-        # ── Scorecard (6th output) ────────────────────────────────────────────
-        try:
-            sc = run_google_scorecard(input_path, pillar_result_dicts)
-            agent_results["google_scorecard"] = {"status": "ok", **sc}
-        except Exception as e:
-            traceback.print_exc()
-            agent_results["google_scorecard"] = {
-                "status": "error",
-                "label":  "Google Scorecard",
-                "error":  str(e),
-            }
-        finally:
-            gc.collect()
 
     finally:
         try:

@@ -1,164 +1,146 @@
+import re
 """
 config_google_framework.py
-42 controls: F001-F042
-F042 is always OK (manual QR review).
-F003, F005, F007, F009, F013, F022-F027, F030, F032, F034, F035 are manual/partial
-but still evaluated where proxy data is available.
+22 controls: F001–F022
+Binary methodology: OK or FLAG only — no PARTIAL.
+Manual controls (F006, F008, F013–F016, F019–F022) always return OK with reviewer note.
 """
 from __future__ import annotations
 from config import STATUS_OK, STATUS_FLAG, STATUS_PARTIAL, ControlResult
 
 PILLAR = "google_framework"
-SCORING_EXCLUDED = {"F042"}
-MAX_FINDINGS = 30
 
-PRIORITY_POINTS = {10: -18, 9: -15, 8: -13, 7: -11, 6: -9, 5: -7, 4: -5, 3: -3, 2: -2, 1: 0}
-IMPACT_LABEL    = {10: "Critical", 9: "High", 8: "High", 7: "Medium", 6: "Medium",
-                   5: "Medium",   4: "Low",  3: "Low",  2: "Visibility", 1: "Visibility"}
+# No controls excluded from scoring — manual ones always return OK so they never penalise
+SCORING_EXCLUDED: set = set()
 
+PRIORITY_POINTS = {
+    10: -18, 9: -15, 8: -13, 7: -11,
+     6:  -9, 5:  -7, 4:  -5, 3:  -3, 2: -2, 1: 0,
+}
+
+IMPACT_LABEL = {
+    10: "Critical", 9: "Critical", 8: "High", 7: "High",
+     6: "Medium",   5: "Medium",  4: "Low",  3: "Low",
+     2: "Visibility", 1: "Visibility",
+}
+
+# Matches Importance column (M) in Framework_Reference template
 IMPORTANCE = {
-    "F001": 8,  "F002": 5,  "F003": 6,  "F004": 7,  "F005": 7,
-    "F006": 5,  "F007": 7,  "F008": 7,  "F009": 6,  "F010": 8,
-    "F011": 8,  "F012": 8,  "F013": 7,  "F014": 8,  "F015": 7,
-    "F016": 8,  "F017": 9,  "F018": 8,  "F019": 8,  "F020": 6,
-    "F021": 7,  "F022": 5,  "F023": 4,  "F024": 4,  "F025": 4,
-    "F026": 5,  "F027": 6,  "F028": 7,  "F029": 6,  "F030": 7,
-    "F031": 6,  "F032": 5,  "F033": 8,  "F034": 7,  "F035": 6,
-    "F036": 7,  "F037": 6,  "F038": 4,  "F039": 9,  "F040": 8,
-    "F041": 6,  "F042": 3,
+    "F001": 8,   # Naming — QT Prefix
+    "F002": 8,   # Naming — Campaign Type Token
+    "F003": 8,   # Naming — Strategy Tag
+    "F004": 6,   # Display Expansion Disabled
+    "F005": 5,   # Promotion End Dates
+    "F006": 8,   # PMAX Automation Settings (manual → always OK)
+    "F007": 8,   # Match Type — BROAD Dominance
+    "F008": 8,   # TM Terms Uploaded (manual proxy → always OK)
+    "F009": 10,  # Branded Search Campaign Active
+    "F010": 8,   # Search Term Waste
+    "F011": 7,   # Negative Keyword Coverage
+    "F012": 8,   # Budget Concentration — PMAX Dominance
+    "F013": 6,   # Ad Extensions — Sitelinks (manual → always OK)
+    "F014": 4,   # Ad Extensions — Structured Snippets (manual → always OK)
+    "F015": 4,   # Ad Extensions — Callouts (manual → always OK)
+    "F016": 4,   # Business Name Configured (manual → always OK)
+    "F017": 6,   # Logos Approved
+    "F018": 4,   # Ad Strength
+    "F019": 5,   # Keyword Expander (manual → always OK)
+    "F020": 6,   # PMAX Audience Requirements (manual → always OK)
+    "F021": 5,   # PMAX Search Themes (manual → always OK)
+    "F022": 8,   # Match Type — EXACT Coverage
 }
 
 CONTROL_NAMES = {
-    "F001": "Naming Convention Compliance",
-    "F002": "Legacy Campaign Cleanup",
-    "F003": "Auto-Apply Settings",
+    "F001": "Naming Convention — QT Prefix",
+    "F002": "Naming Convention — Campaign Type Token",
+    "F003": "Naming Convention — Strategy Tag",
     "F004": "Display Expansion Disabled on Search",
-    "F005": "Location Targeting Mode",
-    "F006": "Promotion End Dates",
-    "F007": "PMAX Automation Settings Disabled",
-    "F008": "Match Type Governance",
-    "F009": "TM Terms Uploaded to QT Portal",
-    "F010": "Branded Search Campaign Active",
-    "F011": "Non-Brand Search Campaign Active",
-    "F012": "Search Term Waste",
-    "F013": "Negative Keyword Coverage",
-    "F014": "PMAX Bid Strategy",
-    "F015": "Shopping Bid Strategy",
-    "F016": "Budget Concentration — PMAX Dominance",
-    "F017": "ACoS vs Constraint Alignment",
-    "F018": "Budget vs MRR Alignment",
-    "F019": "Feed Product Availability",
-    "F020": "Price Competitiveness",
-    "F021": "PMAX Channel Distribution",
-    "F022": "Ad Extensions — Sitelinks",
-    "F023": "Ad Extensions — Structured Snippets",
-    "F024": "Ad Extensions — Callouts",
-    "F025": "Business Name Configured",
-    "F026": "Logos Approved",
-    "F027": "Ad Strength",
-    "F028": "DPL Coverage",
-    "F029": "Product Type Coverage in Feed",
-    "F030": "PMAX Listing Group Eligible",
-    "F031": "Shopping Campaign Priority",
-    "F032": "Quartile Keyword Expander Enabled",
-    "F033": "Full Funnel Channel Coverage",
-    "F034": "PMAX Audience Requirements",
-    "F035": "PMAX Search Themes",
-    "F036": "Device Performance Imbalance",
-    "F037": "Geo Spend Concentration",
-    "F038": "MultiChannel Product Coverage",
-    "F039": "Conversion Tracking Active",
-    "F040": "YoY ACoS Trend",
-    "F041": "PoP Spend Variance",
-    "F042": "Manual QR Review",
+    "F005": "Promotion End Dates",
+    "F006": "PMAX Automation Settings Disabled",
+    "F007": "Match Type Governance — BROAD Dominance",
+    "F008": "TM Terms Uploaded to QT Portal",
+    "F009": "Branded Search Campaign Active",
+    "F010": "Search Term Waste",
+    "F011": "Negative Keyword Coverage",
+    "F012": "Budget Concentration — PMAX Dominance",
+    "F013": "Ad Extensions — Sitelinks",
+    "F014": "Ad Extensions — Structured Snippets",
+    "F015": "Ad Extensions — Callouts",
+    "F016": "Business Name Configured",
+    "F017": "Logos Approved",
+    "F018": "Ad Strength",
+    "F019": "Quartile Keyword Expander Enabled",
+    "F020": "PMAX Audience Requirements",
+    "F021": "PMAX Search Themes",
+    "F022": "Match Type Governance — EXACT Coverage",
 }
 
 WHY = {
-    "F001": "Non-QT_ named campaigns are unmanaged or legacy — outside governance.",
-    "F002": "Legacy campaigns signal unresolved structural debt.",
-    "F003": "Uncontrolled auto-apply introduces changes outside standard governance.",
-    "F004": "Display expansion leaks Search budget to irrelevant placements.",
-    "F005": "Interest-based targeting inflates reach with low-intent users outside the intended market.",
-    "F006": "Expired promos waste budget on irrelevant messaging.",
-    "F007": "PMAX automations override QT optimization logic with uncontrolled changes.",
-    "F008": "Pure BROAD-only or EXACT-only reduces coverage and control simultaneously.",
-    "F009": "Without TM terms in the portal, branded query routing cannot be governed.",
-    "F010": "Without a branded campaign, TM terms are unprotected and unattributed.",
-    "F011": "Without NB coverage, the account relies entirely on PMAX with no query-level visibility.",
-    "F012": "Unmanaged waste terms mean missing negatives and budget leakage.",
-    "F013": "Campaigns without negatives have uncontrolled query routing and irrelevant traffic.",
-    "F014": "PMAX + MANUAL_CPC defeats signal optimization and removes the automation advantage entirely.",
-    "F015": "Manual CPC on Shopping without structural rationale is a governance risk at scale.",
-    "F016": "PMAX dominance without Search means a black-box account with no query-level visibility.",
-    "F017": "Operating above the ACoS constraint without documentation signals strategy misalignment.",
-    "F018": "Significant over/underspend signals budget governance failure and creates billing risk.",
-    "F019": "Every dollar spent on an out-of-stock product generates a click that cannot convert.",
-    "F020": "Products significantly below benchmark price signal margin erosion or feed pricing errors.",
-    "F021": "100% Shopping PMAX is under-optimized — missing upper-funnel signal.",
-    "F022": "Fewer than 4 sitelinks reduce ad real estate and limit navigation for high-intent users.",
-    "F023": "Missing snippets reduce ad completeness and relevance signals.",
-    "F024": "Missing callouts leave available messaging space unused.",
-    "F025": "Missing business name reduces ad credibility and quality signals.",
-    "F026": "Missing logo defaults PMAX Display ads to text-only, reducing brand presence.",
-    "F027": "Poor ad strength across all asset groups reduces auction competitiveness.",
-    "F028": "Without DPL, all products are bid uniformly regardless of performance tier.",
-    "F029": "Missing product types prevent campaign segmentation and DPL targeting by category.",
-    "F030": "Asset groups without eligible listing groups cannot serve Shopping inventory.",
-    "F031": "Incorrect priority order breaks funneling structure and routes traffic to the wrong campaign tier.",
-    "F032": "Keyword Expander disabled means the account is not benefiting from QT's automated expansion logic.",
-    "F033": "Single-channel account has no funnel coverage and no redundancy.",
-    "F034": "PMAX without audience signals operates in pure query-matching mode with no behavioral layering.",
-    "F035": "Fewer than 10 search themes gives Google insufficient intent signal to guide PMAX.",
-    "F036": "High mobile spend with low mobile CVR means budget is leaking to low-intent device traffic.",
-    "F037": "Spend concentrated in zero-conversion regions is targeting inefficiency compounding over time.",
-    "F038": "Products active on both Google and Amazon without cross-channel visibility create attribution blind spots.",
-    "F039": "Campaigns spending with zero conversions means tracking failure or a critical CVR issue.",
-    "F040": "Degrading ACoS YoY without a documented reason is a structural inefficiency signal.",
-    "F041": "Spend variance over 30% MoM without seasonal context signals budget instability.",
-    "F042": "Manual review required during the QR presentation call — quality cannot be assessed from data.",
+    "F001": "Non-QT_ campaigns are unmanaged or legacy — outside CoE governance and audit traceability.",
+    "F002": "Invalid campaign type tokens break automated parsing and make campaign type segmentation unreliable.",
+    "F003": "Invalid strategy tags prevent performance-based campaign segmentation and DPL targeting by tier.",
+    "F004": "Display expansion routes Search budget to placements with fundamentally different intent signals — inflating impressions while suppressing CVR.",
+    "F005": "Expired promotional campaigns waste budget on irrelevant messaging and risk policy violations.",
+    "F006": "PMAX automations override QT optimization logic with uncontrolled asset and bid changes.",
+    "F007": "A BROAD-dominated keyword mix (>80%) gives the bidding system minimal query-level constraints, exposing the account to irrelevant traffic at scale.",
+    "F008": "Without TM terms in the portal, branded query routing cannot be governed — competitor ads can capture high-intent branded searches.",
+    "F009": "Without a branded campaign, TM terms are unprotected and brand-driven conversions are unattributed.",
+    "F010": "Unmanaged waste terms signal missing negatives and direct budget leakage into non-converting queries.",
+    "F011": "Accounts with zero keyword negatives have completely uncontrolled query routing — every irrelevant query competes for budget.",
+    "F012": "PMAX dominance (>85%) without Search means a black-box account with no query-level visibility, no negative governance surface, and no branded query protection.",
+    "F013": "Fewer than 4 sitelinks reduce ad real estate and limit navigation for high-intent users.",
+    "F014": "Missing snippets reduce ad completeness and relevance signals for category-based queries.",
+    "F015": "Missing callouts leave available ad messaging space unused, reducing competitive ad strength.",
+    "F016": "Missing business name reduces ad credibility and trust signals for new users.",
+    "F017": "Missing approved image assets prevent PMAX from serving Display and YouTube ad formats — eliminating upper-funnel inventory.",
+    "F018": "An account where all rated assets show LOW has insufficient creative variety — Google deprioritizes these asset groups in auctions.",
+    "F019": "Keyword Expander disabled removes QT's automated Search expansion advantage, limiting keyword growth.",
+    "F020": "PMAX without audience signals operates in pure query-matching mode with no behavioral targeting layer.",
+    "F021": "Fewer than 10 Search Themes gives Google insufficient intent signal to guide PMAX toward relevant queries.",
+    "F022": "Without sufficient EXACT coverage (<10%), the account cannot enforce precise query control on high-value, high-CVR terms.",
 }
 
-SOURCES = {
-    "F001": "38_Google_Campaign_Settings[CampaignName, Status]",
-    "F002": "38_Google_Campaign_Settings[Status=PAUSED, StartDate] + 13_Campaign_Gold_Metrics[Cost]",
-    "F003": "38_Google_Campaign_Settings[BiddingStrategyType] — proxy only",
-    "F004": "38_Google_Campaign_Settings[TargetContentNetwork, AdvertisingChannelType]",
-    "F005": "26_Location_Performance[Region, Cost, Conversions] — proxy spend in zero-conv regions",
-    "F006": "38_Google_Campaign_Settings[CampaignName, StartDate] — promo keyword patterns",
-    "F007": "MANUAL — Google Ads PMAX Settings UI",
-    "F008": "09_Keyword_Report[MatchType]",
-    "F009": "09_Keyword_Report[Keyword] — branded keyword proxy",
-    "F010": "35_Google_Campaigns_V2_Enriched[CampaignName] + 13_Campaign_Gold_Metrics[Cost]",
-    "F011": "35_Google_Campaigns_V2_Enriched[CampaignName] + 13_Campaign_Gold_Metrics[Cost]",
-    "F012": "11_Search_Terms_Report[SearchTerm, Cost, Conversions] + 02_Date_Range_KPIs[CPC]",
-    "F013": "31_Negative_Keywords[Keyword, Type] — check for actual keyword negatives",
-    "F014": "38_Google_Campaign_Settings[AdvertisingChannelType=PERFORMANCE_MAX, BiddingStrategyType]",
-    "F015": "38_Google_Campaign_Settings[AdvertisingChannelType=SHOPPING, BiddingStrategyType]",
-    "F016": "07_Campaigns_by_Channel_Type[Perc_Spend]",
-    "F017": "02_Date_Range_KPIs[ACoS] + 22_Client_Success[ACOS_Constraint__c col 14]",
-    "F018": "02_Date_Range_KPIs[AdSpend] + 22_Client_Success[Monthly_Budget__c col 35]",
-    "F019": "30_Feed_Products[Availability, cost]",
-    "F020": "20_Price_Competitiveness[price_gap_perc]",
-    "F021": "18_PMAX_Channels[FieldType, Cost]",
-    "F022": "MANUAL — Google Ads Assets: Sitelinks",
-    "F023": "MANUAL — Google Ads Assets: Structured Snippets",
-    "F024": "MANUAL — Google Ads Assets: Callouts",
-    "F025": "MANUAL — Google Ads Assets: Business Name",
-    "F026": "33_Google_Assets_Extensions[FieldType=MARKETING_IMAGE/SQUARE/PORTRAIT, PolicyApprovalStatus, Status]",
-    "F027": "33_Google_Assets_Extensions[PerformanceLabel distribution]",
-    "F028": "28_DPL_Performance — check if populated",
-    "F029": "30_Feed_Products[ProductType]",
-    "F030": "32_Google_Asset_Groups[PrimaryStatus, AssetGroupStatus]",
-    "F031": "35_Google_Campaigns_V2_Enriched[CampaignName] — infer priority from name tier",
-    "F032": "MANUAL — QT Portal > Google Channel > Keyword Expander",
-    "F033": "07_Campaigns_by_Channel_Type[AdvertisingChannelType, Spend]",
-    "F034": "MANUAL — Google Ads Asset Groups > Audiences",
-    "F035": "MANUAL — Google Ads Asset Groups > Search Themes",
-    "F036": "16_Device_Breakdown[Device, Spend, Orders, Sales]",
-    "F037": "26_Location_Performance[Region, Cost, Conversions]",
-    "F038": "19_MultiChannel_Products + 27_Amazon_Product",
-    "F039": "13_Campaign_Gold_Metrics[CampaignId, Cost, Conversions]",
-    "F040": "03_Yearly_KPIs[ACoS row]",
-    "F041": "02_Date_Range_KPIs[AdSpend, Prev_AdSpend]",
-    "F042": "Manual review required — QR presentation call",
+WYSD = {
+    "F001": "Rename all non-QT_ campaigns to follow the QT_ naming standard or pause/remove legacy campaigns.",
+    "F002": "Rename campaigns to use a valid campaign type token as the second component (e.g., QT_Pmax_, QT_Search_, QT_Shopping_).",
+    "F003": "Rename campaigns to use a valid strategy tag as the third component (e.g., General, TopProducts, Zombie, Suppression).",
+    "F004": "Disable Display Network expansion on all Search campaigns: Campaign Settings > Networks > uncheck 'Display Network'.",
+    "F005": "Pause or end promotional campaigns whose event window has passed. Set campaign end dates to match the actual promotion period.",
+    "F006": "Disable auto-created assets, Final URL expansion, and store goals auto-apply for all active PMAX campaigns.",
+    "F007": "Add EXACT and PHRASE match keywords to reduce BROAD dominance below 80%. Prioritise top-converting search terms from the Search Terms report.",
+    "F008": "Log into QT Portal > Google > Branded Terms and confirm all trademark terms are uploaded and current.",
+    "F009": "Ensure a dedicated branded Search campaign (TM, SKW, or Branded in name) is active with positive spend in the window.",
+    "F010": "Add zero-conversion waste terms as negative keywords to relevant campaigns or shared exclusion lists. Prioritise by waste spend descending.",
+    "F011": "Add shared negative keyword lists covering brand protection, competitor terms, and top waste queries. Assign to all active Search and Shopping campaigns.",
+    "F012": "Introduce or scale Search campaigns alongside PMAX. Target at least 10–15% of total spend in Search for query-level visibility.",
+    "F013": "Add or activate sitelink extensions to reach minimum 4 at account level. Ensure all are approved and point to meaningful destination pages.",
+    "F014": "Add structured snippets relevant to the account's product categories (e.g., Product Types, Services, Styles).",
+    "F015": "Add callout extensions highlighting USPs: free shipping, easy returns, warranty, same-day delivery.",
+    "F016": "Add an approved business name asset at account level matching the actual brand/company name.",
+    "F017": "Upload and approve at least one image/logo asset per active PMAX asset group. Verify PolicyApprovalStatus = APPROVED.",
+    "F018": "Add asset variety to PMAX asset groups: additional headlines, descriptions, images, and video assets to improve ad strength.",
+    "F019": "Enable Keyword Expander for all active Search campaigns in QT Portal > Google Channel.",
+    "F020": "Add at minimum: 1 custom intent segment and 1 remarketing list to each active PMAX asset group.",
+    "F021": "Add at least 10 Search Themes per PMAX asset group, aligned with top product categories and key search terms.",
+    "F022": "Add EXACT match versions of the account's highest-converting search terms. Priority: branded terms, top product queries, high-CVR terms from Tab 10.",
 }
+
+# Approved naming convention values
+VALID_CAMPAIGN_TYPES = {
+    "pmax", "pmaxfeed", "pmaxassets", "pmaxnca", "pmaxncafeed", "pmaxncaassets",
+    "pmaxlocal", "search", "searchdsa", "searchdsapagefeed", "searchdsapagefeedNCA".lower(),
+    "searchnca", "shopping", "shoppinglia", "shoppingsqf",
+    "demandgen", "display", "youtube",
+}
+
+VALID_STRATEGY_TAGS = {
+    "general", "topproducts", "lowperformers", "zombie", "suppression", "shopifytop",
+}
+
+PROMO_KEYWORDS = re.compile(
+    r'\b(sale|promo|promotion|holiday|blackfriday|black_friday|cyber|cybermonday|'
+    r'bfcm|seasonal|clearance|discount|flash|laborday|memorialday|'
+    r'mothersday|fathersday|valentines|halloween|thanksgiving|christmas|xmas|'
+    r'primetime|primeday)\b',
+    re.IGNORECASE,
+)
