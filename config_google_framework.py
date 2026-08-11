@@ -1,4 +1,3 @@
-import re
 """
 config_google_framework.py
 22 controls: F001–F022
@@ -6,6 +5,9 @@ Binary methodology: OK or FLAG only — no PARTIAL.
 Manual controls (F006, F008, F013–F016, F019–F022) always return OK with reviewer note.
 """
 from __future__ import annotations
+
+import re
+
 from config import STATUS_OK, STATUS_FLAG, STATUS_PARTIAL, ControlResult
 
 PILLAR = "google_framework"
